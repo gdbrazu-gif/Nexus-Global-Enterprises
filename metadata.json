@@ -1,0 +1,6 @@
+{
+  "name": "ApexHRMS — Enterprise ERP & HR Ledger",
+  "description": "Comprehensive enterprise HRMS & ERP suite with Attendance & Time Ledger matrix, customizable printable templates, multi-currency SAR financial engine, RBAC, and asset management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
