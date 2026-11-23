@@ -38,9 +38,28 @@ export const EmployeeSelfService: React.FC<EmployeeSelfServiceProps> = ({
   const [leaveType, setLeaveType] = useState<'Annual Vacation' | 'Sick Leave' | 'Emergency Leave'>('Annual Vacation');
   const [startDate, setStartDate] = useState('2026-11-05');
   const [endDate, setEndDate] = useState('2026-11-12');
-  const [days, setDays] = useState(6);
+  const [days, setDays] = useState(8);
   const [reason, setReason] = useState('');
   const [submittedSuccess, setSubmittedSuccess] = useState(false);
+
+  if (!emp) {
+    return (
+      <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-xs text-slate-500">
+        No employee profile is currently linked to this session.
+      </div>
+    );
+  }
+
+  const updateDatesAndDays = (nextStart: string, nextEnd: string) => {
+    setStartDate(nextStart);
+    setEndDate(nextEnd);
+    const s = new Date(nextStart);
+    const e = new Date(nextEnd);
+    if (!Number.isNaN(s.getTime()) && !Number.isNaN(e.getTime()) && e >= s) {
+      const diffDays = Math.floor((e.getTime() - s.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+      setDays(Math.max(1, Math.min(60, diffDays)));
+    }
+  };
 
   // Filter own timesheets for current month
   const ownTimesheets = timesheetEntries.filter(
@@ -62,7 +81,7 @@ export const EmployeeSelfService: React.FC<EmployeeSelfServiceProps> = ({
       leaveType,
       startDate,
       endDate,
-      totalDays: Number(days),
+      totalDays: Math.max(1, Number(days) || 1),
       reason,
     });
     setSubmittedSuccess(true);
@@ -264,33 +283,41 @@ export const EmployeeSelfService: React.FC<EmployeeSelfServiceProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {ownTimesheets.slice(0, 15).map((entry) => (
-                  <tr key={entry.id} className="hover:bg-slate-50/60">
-                    <td className="p-2.5 font-bold text-slate-800">{entry.date}</td>
-                    <td className="p-2.5 capitalize font-sans">
-                      <span
-                        className={`text-[11px] font-semibold ${
-                          entry.status === 'present'
-                            ? 'text-emerald-700'
-                            : entry.status === 'overtime'
-                            ? 'text-amber-700'
-                            : entry.status === 'weekend'
-                            ? 'text-slate-400'
-                            : 'text-blue-700'
-                        }`}
-                      >
-                        {entry.status.replace('_', ' ')}
-                      </span>
-                    </td>
-                    <td className="p-2.5 text-right tabular-nums">{entry.regularHours}</td>
-                    <td className="p-2.5 text-right tabular-nums text-amber-700 font-bold">
-                      {entry.overtimeHours > 0 ? `+${entry.overtimeHours}` : '-'}
-                    </td>
-                    <td className="p-2.5 font-sans text-slate-500 text-[11px]">
-                      {entry.notes || '-'}
+                {ownTimesheets.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="p-6 text-center font-sans text-slate-400">
+                      No timesheet entries logged for October 2026.
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  ownTimesheets.slice(0, 31).map((entry) => (
+                    <tr key={entry.id} className="hover:bg-slate-50/60">
+                      <td className="p-2.5 font-bold text-slate-800">{entry.date}</td>
+                      <td className="p-2.5 capitalize font-sans">
+                        <span
+                          className={`text-[11px] font-semibold ${
+                            entry.status === 'present'
+                              ? 'text-emerald-700'
+                              : entry.status === 'overtime'
+                              ? 'text-amber-700'
+                              : entry.status === 'weekend'
+                              ? 'text-slate-400'
+                              : 'text-blue-700'
+                          }`}
+                        >
+                          {entry.status.replace('_', ' ')}
+                        </span>
+                      </td>
+                      <td className="p-2.5 text-right tabular-nums">{entry.regularHours}</td>
+                      <td className="p-2.5 text-right tabular-nums text-amber-700 font-bold">
+                        {entry.overtimeHours > 0 ? `+${entry.overtimeHours}` : '-'}
+                      </td>
+                      <td className="p-2.5 font-sans text-slate-500 text-[11px]">
+                        {entry.notes || '-'}
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -331,7 +358,7 @@ export const EmployeeSelfService: React.FC<EmployeeSelfServiceProps> = ({
                     type="date"
                     required
                     value={startDate}
-                    onChange={(e) => setStartDate(e.target.value)}
+                    onChange={(e) => updateDatesAndDays(e.target.value, endDate)}
                     className="w-full rounded-md border border-slate-200 px-3 py-1.5 outline-none"
                   />
                 </div>
@@ -341,7 +368,7 @@ export const EmployeeSelfService: React.FC<EmployeeSelfServiceProps> = ({
                     type="date"
                     required
                     value={endDate}
-                    onChange={(e) => setEndDate(e.target.value)}
+                    onChange={(e) => updateDatesAndDays(startDate, e.target.value)}
                     className="w-full rounded-md border border-slate-200 px-3 py-1.5 outline-none"
                   />
                 </div>
@@ -352,9 +379,9 @@ export const EmployeeSelfService: React.FC<EmployeeSelfServiceProps> = ({
                 <input
                   type="number"
                   min={1}
-                  max={30}
+                  max={60}
                   value={days}
-                  onChange={(e) => setDays(Number(e.target.value))}
+                  onChange={(e) => setDays(Math.max(1, Number(e.target.value) || 1))}
                   className="w-full rounded-md border border-slate-200 px-3 py-1.5 font-mono outline-none"
                 />
               </div>

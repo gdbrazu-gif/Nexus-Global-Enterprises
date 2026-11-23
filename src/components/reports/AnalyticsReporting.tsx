@@ -21,33 +21,47 @@ export const AnalyticsReporting: React.FC = () => {
     formatCurrency,
     baseCurrency,
     corporateEntity,
+    activeBranchId,
     t,
   } = useHRMS();
 
   const [printReportOpen, setPrintReportOpen] = useState(false);
 
+  const branchEmployees =
+    activeBranchId === 'all'
+      ? employees
+      : employees.filter((e) => (e.branchId || 'BR-RUH') === activeBranchId);
+  const branchExpenses =
+    activeBranchId === 'all'
+      ? expenses
+      : expenses.filter((e) => (e.branchId || 'BR-RUH') === activeBranchId);
+  const branchProjects =
+    activeBranchId === 'all'
+      ? projects
+      : projects.filter((p) => (p.branchId || 'BR-RUH') === activeBranchId);
+
   // Financial & HR Intelligence Calculations
-  const totalMonthlyBase = employees.reduce((acc, e) => acc + e.monthlyBaseSalary, 0);
-  const totalAnnualBase = employees.reduce((acc, e) => acc + e.annualBaseSalary, 0);
-  const totalMonthlyPackage = employees.reduce((acc, e) => acc + e.totalMonthlyPackage, 0);
+  const totalMonthlyBase = branchEmployees.reduce((acc, e) => acc + e.monthlyBaseSalary, 0);
+  const totalAnnualBase = branchEmployees.reduce((acc, e) => acc + e.annualBaseSalary, 0);
+  const totalMonthlyPackage = branchEmployees.reduce((acc, e) => acc + e.totalMonthlyPackage, 0);
 
   // Department salary distribution
-  const departmentBreakdown = employees.reduce((acc, e) => {
+  const departmentBreakdown = branchEmployees.reduce((acc, e) => {
     acc[e.department] = (acc[e.department] || 0) + e.totalMonthlyPackage;
     return acc;
   }, {} as Record<string, number>);
 
   // Approved vs Pending expenses
-  const approvedExpenses = expenses
+  const approvedExpenses = branchExpenses
     .filter((e) => e.status === 'approved')
     .reduce((acc, e) => acc + e.amountSAR, 0);
-  const pendingExpenses = expenses
+  const pendingExpenses = branchExpenses
     .filter((e) => e.status === 'pending')
     .reduce((acc, e) => acc + e.amountSAR, 0);
 
   // Projects budget vs spent
-  const totalProjectBudget = projects.reduce((acc, p) => acc + p.budgetSAR, 0);
-  const totalProjectSpent = projects.reduce((acc, p) => acc + p.spentSAR, 0);
+  const totalProjectBudget = branchProjects.reduce((acc, p) => acc + p.budgetSAR, 0);
+  const totalProjectSpent = branchProjects.reduce((acc, p) => acc + p.spentSAR, 0);
 
   return (
     <div className="space-y-6">

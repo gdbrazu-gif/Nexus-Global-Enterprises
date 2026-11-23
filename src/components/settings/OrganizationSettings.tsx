@@ -1,803 +1,763 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useHRMS } from '../../context/HRMSContext';
 import { SUPPORTED_CURRENCIES } from '../../data/initialData';
-import { CustomPrivilege, RoleTier } from '../../types';
+import { CorporateLegalEntity } from '../../types';
 import {
+  AlertCircle,
   Building2,
-  Coins,
-  Shield,
-  Key,
-  Plus,
-  Share2,
-  Trash2,
-  Edit3,
   Check,
-  CreditCard,
-  UserCheck,
-  X,
-  Mail,
   Copy,
-  Upload,
-  Image,
+  Landmark,
+  Loader2,
+  Mail,
+  MapPin,
+  Phone,
   RotateCcw,
+  Save,
+  Share2,
+  Upload,
 } from 'lucide-react';
+
+const DEFAULT_LOGO_PATH = '/src/assets/images/corporate_logo_hrms_1791900623826.jpg';
+const MAX_LOGO_URL_LENGTH = 65536;
+
+function extractReadableErrorMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err || 'Failed to save Corporate Identity settings.');
+  try {
+    const parsed = JSON.parse(raw) as { error?: string };
+    if (parsed && typeof parsed.error === 'string' && parsed.error.trim()) {
+      return parsed.error;
+    }
+  } catch {
+    // Plain error string
+  }
+  return raw;
+}
+
+async function compressCorporateLogo(file: File): Promise<string> {
+  const rawDataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') resolve(reader.result);
+      else reject(new Error('Could not read image file.'));
+    };
+    reader.onerror = () => reject(new Error('Failed to read selected image file.'));
+    reader.readAsDataURL(file);
+  });
+
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Unsupported or corrupted image format.'));
+    image.src = rawDataUrl;
+  });
+
+  const maxDim = 240;
+  const scale = Math.min(1, maxDim / Math.max(img.width || maxDim, img.height || maxDim));
+  const width = Math.max(1, Math.round((img.width || maxDim) * scale));
+  const height = Math.max(1, Math.round((img.height || maxDim) * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    return rawDataUrl;
+  }
+
+  ctx.clearRect(0, 0, width, height);
+  ctx.drawImage(img, 0, 0, width, height);
+
+  // Prefer transparent PNG for crisp letterheads & jsPDF compatibility
+  const pngUrl = canvas.toDataURL('image/png');
+  if (pngUrl.length <= MAX_LOGO_URL_LENGTH - 2048) {
+    return pngUrl;
+  }
+
+  // Fallback to JPEG if PNG exceeds cloud storage budget
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, width, height);
+  ctx.drawImage(img, 0, 0, width, height);
+
+  for (const quality of [0.85, 0.72, 0.55]) {
+    const jpgUrl = canvas.toDataURL('image/jpeg', quality);
+    if (jpgUrl.length <= MAX_LOGO_URL_LENGTH - 2048) {
+      return jpgUrl;
+    }
+  }
+
+  throw new Error('Selected logo image is still too large after compression. Please choose a smaller image.');
+}
 
 export const OrganizationSettings: React.FC = () => {
   const {
     corporateEntity,
     updateCorporateEntity,
     baseCurrency,
-    setBaseCurrency,
-    formatCurrency,
-    customPrivileges,
-    addCustomPrivilege,
-    updateCustomPrivilege,
-    deleteCustomPrivilege,
-    employees,
-    updateEmployee,
-    canPerformAdminAction,
     setShareAccessModalOpen,
-    t,
+    canPerformAdminAction,
+    cloudAuthorized,
   } = useHRMS();
 
-  const [activeTab, setActiveTab] = useState<'corporate' | 'currency' | 'rbac' | 'privileges'>('corporate');
-
-  // Corporate Form State
-  const [legalForm, setLegalForm] = useState({ ...corporateEntity });
+  const [legalForm, setLegalForm] = useState<CorporateLegalEntity>({ ...corporateEntity });
+  const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [logoError, setLogoError] = useState(false);
+  const [logoUploadError, setLogoUploadError] = useState<string | null>(null);
+  const [copiedField, setCopiedField] = useState<string | null>(null);
 
-  // Custom Privilege Modal
-  const [privModalOpen, setPrivModalOpen] = useState(false);
-  const [editingPrivId, setEditingPrivId] = useState<string | null>(null);
-  const [privForm, setPrivForm] = useState({
-    name: '',
-    description: '',
-    assignedUsersCount: 1,
-    permissions: {
-      canView: true,
-      canEdit: false,
-      canDelete: false,
-      canApprove: false,
-      canExportPdf: true,
-      canManageSalary: false,
-      canManageExpense: false,
-      canManageTimesheet: false,
-    },
-  });
+  useEffect(() => {
+    setLegalForm({ ...corporateEntity });
+    setLogoError(false);
+    setLogoUploadError(null);
+  }, [corporateEntity]);
 
-  const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const isCloudReadOnly = cloudAuthorized && !canPerformAdminAction;
+
+  const hasUnsavedChanges = useMemo(() => {
+    return (
+      legalForm.companyName !== corporateEntity.companyName ||
+      legalForm.legalName !== corporateEntity.legalName ||
+      legalForm.logoUrl !== corporateEntity.logoUrl ||
+      legalForm.crNumber !== corporateEntity.crNumber ||
+      legalForm.vatNumber !== corporateEntity.vatNumber ||
+      legalForm.email !== corporateEntity.email ||
+      legalForm.phone !== corporateEntity.phone ||
+      legalForm.address !== corporateEntity.address ||
+      legalForm.bankName !== corporateEntity.bankName ||
+      legalForm.accountTitle !== corporateEntity.accountTitle ||
+      legalForm.iban !== corporateEntity.iban ||
+      legalForm.swiftCode !== corporateEntity.swiftCode ||
+      (legalForm.baseCurrency || 'SAR') !== (corporateEntity.baseCurrency || 'SAR')
+    );
+  }, [legalForm, corporateEntity]);
+
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        if (typeof reader.result === 'string') {
-          setLegalForm((prev) => ({ ...prev, logoUrl: reader.result as string }));
-        }
-      };
-      reader.readAsDataURL(file);
+    e.target.value = '';
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      setLogoUploadError('Please select a valid image file (PNG, JPG, WebP, or SVG).');
+      return;
+    }
+
+    setLogoUploadError(null);
+    setSaveError(null);
+
+    try {
+      const optimizedDataUrl = await compressCorporateLogo(file);
+      setLogoError(false);
+      setLegalForm((prev) => ({ ...prev, logoUrl: optimizedDataUrl }));
+    } catch (err) {
+      setLogoUploadError(extractReadableErrorMessage(err));
     }
   };
 
-  const handleSaveCorporate = (e: React.FormEvent) => {
-    e.preventDefault();
-    updateCorporateEntity(legalForm);
-    setSaveSuccess(true);
-    setTimeout(() => setSaveSuccess(false), 2500);
+  const handleResetUnsaved = () => {
+    setLegalForm({ ...corporateEntity });
+    setLogoError(false);
+    setLogoUploadError(null);
+    setSaveError(null);
   };
 
-  const handleSavePrivilege = (e: React.FormEvent) => {
+  const handleCopyValue = (fieldKey: string, value: string) => {
+    if (!value) return;
+    navigator.clipboard?.writeText(value);
+    setCopiedField(fieldKey);
+    setTimeout(() => setCopiedField(null), 1800);
+  };
+
+  const handleSaveCorporate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (editingPrivId) {
-      updateCustomPrivilege(editingPrivId, privForm);
-    } else {
-      addCustomPrivilege(privForm);
+    if (saving || isCloudReadOnly) return;
+
+    const trimmedLogoUrl = (legalForm.logoUrl || '').trim();
+    if (trimmedLogoUrl.length > MAX_LOGO_URL_LENGTH) {
+      setSaveError(
+        `Corporate emblem URL exceeds the ${MAX_LOGO_URL_LENGTH.toLocaleString()} character cloud limit. Upload a file to auto-compress or enter a shorter URL.`
+      );
+      return;
     }
-    setPrivModalOpen(false);
-    setEditingPrivId(null);
+
+    setSaving(true);
+    setSaveError(null);
+    setSaveSuccess(false);
+
+    try {
+      await updateCorporateEntity(legalForm);
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 3000);
+    } catch (err) {
+      setSaveError(extractReadableErrorMessage(err));
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
+    <form onSubmit={handleSaveCorporate} className="space-y-6">
+      {/* Page Header */}
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between border-b border-slate-200 pb-4">
         <div>
-          <h1 className="text-xl font-bold tracking-tight text-slate-900">
-            {t.navSettings}
+          <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900">
+            Corporate Identity & Legal Entity
           </h1>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Corporate identity, legal entity records, multi-currency engine, and Super Admin RBAC governance.
+          <p className="text-xs sm:text-sm text-slate-500 mt-1">
+            Official trading name, statutory registration credentials, corporate emblem, and payroll treasury banking.
           </p>
         </div>
 
-        <button
-          onClick={() => setShareAccessModalOpen(true)}
-          className="flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-semibold text-white hover:bg-slate-800 transition-colors shadow-xs"
-        >
-          <Share2 className="h-4 w-4" />
-          <span>Share User Access via Email</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          {saveSuccess && (
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 whitespace-nowrap">
+              <Check className="h-4 w-4 text-emerald-600" />
+              <span>{cloudAuthorized ? 'Saved & synced to cloud' : 'Saved to directory'}</span>
+            </span>
+          )}
+
+          {hasUnsavedChanges && !isCloudReadOnly && (
+            <button
+              type="button"
+              onClick={handleResetUnsaved}
+              disabled={saving}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <RotateCcw className="h-3.5 w-3.5 text-slate-500" />
+              <span>Discard</span>
+            </button>
+          )}
+
+          <button
+            type="submit"
+            disabled={saving || isCloudReadOnly}
+            className="flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            {saving ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Save className="h-3.5 w-3.5" />
+            )}
+            <span>{saving ? 'Saving...' : 'Save Corporate Identity'}</span>
+          </button>
+        </div>
       </div>
 
-      {/* Tabs */}
-      <div className="flex items-center gap-2 border-b border-slate-200 text-xs">
-        <button
-          onClick={() => setActiveTab('corporate')}
-          className={`pb-2.5 px-3 font-semibold border-b-2 transition-colors ${
-            activeTab === 'corporate'
-              ? 'border-slate-900 text-slate-900'
-              : 'border-transparent text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          Corporate Identity & Legal Entity
-        </button>
-        <button
-          onClick={() => setActiveTab('currency')}
-          className={`pb-2.5 px-3 font-semibold border-b-2 transition-colors ${
-            activeTab === 'currency'
-              ? 'border-slate-900 text-slate-900'
-              : 'border-transparent text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          Base Operating Currency (Auto Recalc)
-        </button>
-        <button
-          onClick={() => setActiveTab('rbac')}
-          className={`pb-2.5 px-3 font-semibold border-b-2 transition-colors ${
-            activeTab === 'rbac'
-              ? 'border-slate-900 text-slate-900'
-              : 'border-transparent text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          System Access Role Tiers (All Users)
-        </button>
-        <button
-          onClick={() => setActiveTab('privileges')}
-          className={`pb-2.5 px-3 font-semibold border-b-2 transition-colors ${
-            activeTab === 'privileges'
-              ? 'border-slate-900 text-slate-900'
-              : 'border-transparent text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          Custom Privileges & Granular Permissions
-        </button>
-      </div>
+      {isCloudReadOnly && (
+        <div className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
+          <AlertCircle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
+          <div>
+            <span className="font-semibold">Read-only preview:</span> Only Super Admin users can commit updates to Corporate Identity & Legal Entity settings in the cloud workspace.
+          </div>
+        </div>
+      )}
 
-      {/* TAB 1: Corporate Identity & Legal Entity */}
-      {activeTab === 'corporate' && (
-        <form onSubmit={handleSaveCorporate} className="space-y-5 max-w-3xl">
-          <div className="rounded-xl border border-slate-200 bg-white p-6 space-y-4 text-xs">
+      {saveError && (
+        <div className="flex items-start gap-2.5 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-800">
+          <AlertCircle className="h-4 w-4 text-rose-600 shrink-0 mt-0.5" />
+          <div>{saveError}</div>
+        </div>
+      )}
+
+      {/* Main Two-Column Enterprise Workspace */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        {/* Left 8 Columns: Structured Configuration Sections */}
+        <div className="lg:col-span-8 space-y-6">
+          {/* Section 1: Brand Identity & Logo */}
+          <section className="rounded-xl border border-slate-200 bg-white p-6 space-y-5">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <h3 className="font-bold text-slate-900 text-sm">
-                Corporate Identity, Logo & Registry
-              </h3>
-              {saveSuccess && (
-                <span className="text-emerald-700 font-semibold flex items-center gap-1">
-                  <Check className="h-4 w-4" /> Changes saved to ERP
-                </span>
-              )}
+              <div>
+                <h2 className="text-sm font-bold text-slate-900">
+                  01. Brand Identity & Official Emblem
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Appears on portal headers, PDF timesheets, salary statements, and contractor vouchers.
+                </p>
+              </div>
+              <span className="text-xs font-mono text-slate-400 tabular-nums">
+                {legalForm.baseCurrency || baseCurrency} Ledger
+              </span>
+            </div>
+
+            {/* Logo Upload & Path Controls */}
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-5 pb-4 border-b border-slate-100">
+              <div className="h-20 w-20 rounded-xl border border-slate-200 bg-slate-900 p-2 flex items-center justify-center shrink-0 overflow-hidden">
+                {!logoError && legalForm.logoUrl ? (
+                  <img
+                    src={legalForm.logoUrl}
+                    alt={`${legalForm.companyName} emblem`}
+                    referrerPolicy="no-referrer"
+                    onError={() => setLogoError(true)}
+                    className="h-full w-full object-contain"
+                  />
+                ) : (
+                  <Building2 className="h-8 w-8 text-slate-300" />
+                )}
+              </div>
+
+              <div className="flex-1 w-full space-y-2.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <label
+                    htmlFor="company-logo-upload"
+                    className={`inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 hover:bg-slate-50 transition-colors whitespace-nowrap shrink-0 ${
+                      isCloudReadOnly ? 'opacity-50 pointer-events-none' : 'cursor-pointer'
+                    }`}
+                  >
+                    <Upload className="h-3.5 w-3.5 text-slate-600" />
+                    <span>Upload Logo</span>
+                  </label>
+                  <input
+                    id="company-logo-upload"
+                    type="file"
+                    accept="image/*"
+                    disabled={isCloudReadOnly}
+                    onChange={handleLogoUpload}
+                    className="hidden"
+                  />
+
+                  <button
+                    type="button"
+                    disabled={isCloudReadOnly}
+                    onClick={() => {
+                      setLogoError(false);
+                      setLogoUploadError(null);
+                      setLegalForm((prev) => ({ ...prev, logoUrl: DEFAULT_LOGO_PATH }));
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    <span>Reset Emblem</span>
+                  </button>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="corporate-logo-url"
+                    className="block text-[11px] font-medium text-slate-500 mb-1"
+                  >
+                    Asset Path or Compressed Data URI (auto-optimized to fit cloud & PDF headers)
+                  </label>
+                  <input
+                    id="corporate-logo-url"
+                    type="text"
+                    disabled={isCloudReadOnly}
+                    value={legalForm.logoUrl}
+                    onChange={(e) => {
+                      setLogoError(false);
+                      setLogoUploadError(null);
+                      setLegalForm({ ...legalForm, logoUrl: e.target.value });
+                    }}
+                    className="w-full rounded-lg border border-slate-200 bg-slate-50/70 px-3 py-1.5 font-mono text-[11px] text-slate-700 outline-none focus:border-slate-400 focus:bg-white disabled:opacity-60 transition-colors"
+                  />
+                  {logoUploadError && (
+                    <p className="mt-1 text-[11px] font-medium text-rose-600">{logoUploadError}</p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Trading Name & Registered Legal Name */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label
+                  htmlFor="corporate-trading-name"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  Company Trading Name
+                </label>
+                <input
+                  id="corporate-trading-name"
+                  type="text"
+                  required
+                  disabled={isCloudReadOnly}
+                  value={legalForm.companyName}
+                  onChange={(e) => setLegalForm({ ...legalForm, companyName: e.target.value })}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-900 outline-none focus:border-slate-400 disabled:bg-slate-50 transition-colors"
+                />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="corporate-legal-name"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  Full Legal Registered Entity Name
+                </label>
+                <input
+                  id="corporate-legal-name"
+                  type="text"
+                  required
+                  disabled={isCloudReadOnly}
+                  value={legalForm.legalName}
+                  onChange={(e) => setLegalForm({ ...legalForm, legalName: e.target.value })}
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-900 outline-none focus:border-slate-400 disabled:bg-slate-50 transition-colors"
+                />
+              </div>
+            </div>
+          </section>
+
+          {/* Section 2: Statutory Registry & Official Contact */}
+          <section className="rounded-xl border border-slate-200 bg-white p-6 space-y-5">
+            <div className="border-b border-slate-100 pb-3">
+              <h2 className="text-sm font-bold text-slate-900">
+                02. Statutory Registration & Contact Directory
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Commercial registry numbers, VAT taxation identifier, and primary corporate correspondence details.
+              </p>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block font-medium text-slate-700 mb-1">Company Trading Name</label>
-                <input
-                  type="text"
-                  required
-                  value={legalForm.companyName}
-                  onChange={(e) => setLegalForm({ ...legalForm, companyName: e.target.value })}
-                  className="w-full rounded-md border border-slate-200 px-3 py-1.5 outline-none font-semibold text-xs"
-                />
-              </div>
-
-              <div>
-                <label className="block font-medium text-slate-700 mb-1">
-                  Full Legal Registered Entity Name
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={legalForm.legalName}
-                  onChange={(e) => setLegalForm({ ...legalForm, legalName: e.target.value })}
-                  className="w-full rounded-md border border-slate-200 px-3 py-1.5 outline-none text-xs"
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div>
-                <label className="block font-medium text-slate-700 mb-1">
+                <label
+                  htmlFor="corporate-cr-number"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
                   Commercial Registration (CR Number)
                 </label>
                 <input
+                  id="corporate-cr-number"
                   type="text"
-                  required
+                  disabled={isCloudReadOnly}
                   value={legalForm.crNumber}
                   onChange={(e) => setLegalForm({ ...legalForm, crNumber: e.target.value })}
-                  className="w-full rounded-md border border-slate-200 px-3 py-1.5 font-mono outline-none text-xs"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono tabular-nums text-xs text-slate-900 outline-none focus:border-slate-400 disabled:bg-slate-50 transition-colors"
                 />
               </div>
 
               <div>
-                <label className="block font-medium text-slate-700 mb-1">
+                <label
+                  htmlFor="corporate-vat-number"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
                   Tax / VAT Registration ID
                 </label>
                 <input
+                  id="corporate-vat-number"
                   type="text"
-                  required
+                  disabled={isCloudReadOnly}
                   value={legalForm.vatNumber}
                   onChange={(e) => setLegalForm({ ...legalForm, vatNumber: e.target.value })}
-                  className="w-full rounded-md border border-slate-200 px-3 py-1.5 font-mono outline-none text-xs"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono tabular-nums text-xs text-slate-900 outline-none focus:border-slate-400 disabled:bg-slate-50 transition-colors"
                 />
               </div>
+            </div>
 
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block font-medium text-slate-700 mb-1">Official Company Email</label>
+                <label
+                  htmlFor="corporate-email"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  Official Company Email
+                </label>
                 <input
+                  id="corporate-email"
                   type="email"
                   required
+                  disabled={isCloudReadOnly}
                   value={legalForm.email}
                   onChange={(e) => setLegalForm({ ...legalForm, email: e.target.value })}
-                  className="w-full rounded-md border border-slate-200 px-3 py-1.5 outline-none text-xs"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-900 outline-none focus:border-slate-400 disabled:bg-slate-50 transition-colors"
                 />
               </div>
-            </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label className="block font-medium text-slate-700 mb-1">Company Phone</label>
+                <label
+                  htmlFor="corporate-phone"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  Company Phone
+                </label>
                 <input
+                  id="corporate-phone"
                   type="text"
                   required
+                  disabled={isCloudReadOnly}
                   value={legalForm.phone}
                   onChange={(e) => setLegalForm({ ...legalForm, phone: e.target.value })}
-                  className="w-full rounded-md border border-slate-200 px-3 py-1.5 font-mono outline-none text-xs"
-                />
-              </div>
-
-              <div>
-                <label className="block font-medium text-slate-700 mb-1">Official Corporate Address</label>
-                <input
-                  type="text"
-                  required
-                  value={legalForm.address}
-                  onChange={(e) => setLegalForm({ ...legalForm, address: e.target.value })}
-                  className="w-full rounded-md border border-slate-200 px-3 py-1.5 outline-none text-xs"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono tabular-nums text-xs text-slate-900 outline-none focus:border-slate-400 disabled:bg-slate-50 transition-colors"
                 />
               </div>
             </div>
 
-            {/* Corporate Logo Management */}
-            <div className="pt-3 border-t border-slate-100 space-y-3">
-              <label className="block font-medium text-slate-800">
-                Official Corporate Logo & Brand Emblem
+            <div>
+              <label
+                htmlFor="corporate-address"
+                className="block text-xs font-semibold text-slate-700 mb-1.5"
+              >
+                Official Corporate Address
               </label>
-
-              <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 bg-slate-50 p-3.5 rounded-lg border border-slate-200">
-                <div className="relative group shrink-0">
-                  <img
-                    src={legalForm.logoUrl}
-                    alt="Corporate Emblem"
-                    className="h-16 w-16 rounded-lg object-contain bg-slate-900 p-2 border border-slate-300 shadow-xs"
-                  />
-                </div>
-
-                <div className="flex-1 w-full space-y-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <label
-                      htmlFor="company-logo-file"
-                      className="flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 hover:bg-slate-50 cursor-pointer shadow-xs"
-                    >
-                      <Upload className="h-3.5 w-3.5 text-slate-600" />
-                      <span>Upload New Logo</span>
-                    </label>
-                    <input
-                      id="company-logo-file"
-                      type="file"
-                      accept="image/*"
-                      onChange={handleLogoUpload}
-                      className="hidden"
-                    />
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setLegalForm((prev) => ({
-                          ...prev,
-                          logoUrl: '/src/assets/images/corporate_logo_hrms_1791900623826.jpg',
-                        }))
-                      }
-                      className="flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 hover:bg-slate-50"
-                      title="Reset to default Nexus Global logo"
-                    >
-                      <RotateCcw className="h-3 w-3" />
-                      <span>Reset Default</span>
-                    </button>
-                  </div>
-
-                  <div>
-                    <label className="block text-[11px] text-slate-500 mb-0.5">
-                      Or Image URL / Asset Path:
-                    </label>
-                    <input
-                      type="text"
-                      value={legalForm.logoUrl}
-                      onChange={(e) => setLegalForm({ ...legalForm, logoUrl: e.target.value })}
-                      className="w-full rounded-md border border-slate-200 bg-white px-2.5 py-1 font-mono text-[11px] outline-none focus:border-slate-400"
-                    />
-                  </div>
-                </div>
-              </div>
+              <input
+                id="corporate-address"
+                type="text"
+                required
+                disabled={isCloudReadOnly}
+                value={legalForm.address}
+                onChange={(e) => setLegalForm({ ...legalForm, address: e.target.value })}
+                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-900 outline-none focus:border-slate-400 disabled:bg-slate-50 transition-colors"
+              />
             </div>
-          </div>
+          </section>
 
-          {/* Corporate Bank Details */}
-          <div className="rounded-xl border border-slate-200 bg-white p-6 space-y-4 text-xs">
-            <h3 className="font-bold text-slate-900 text-sm border-b border-slate-100 pb-2">
-              Corporate Bank Account & Payroll Settlement
-            </h3>
+          {/* Section 3: Corporate Bank Account & Payroll Settlement */}
+          <section className="rounded-xl border border-slate-200 bg-white p-6 space-y-5">
+            <div className="border-b border-slate-100 pb-3">
+              <h2 className="text-sm font-bold text-slate-900">
+                03. Treasury Banking & Payroll Settlement
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Primary settlement bank credentials and base operating currency referenced across WPS payroll transfers and vendor remittances.
+              </p>
+            </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className="block font-medium text-slate-700 mb-1">Bank Name</label>
+                <label
+                  htmlFor="corporate-bank-name"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  Bank Name
+                </label>
                 <input
+                  id="corporate-bank-name"
                   type="text"
-                  required
+                  disabled={isCloudReadOnly}
                   value={legalForm.bankName}
                   onChange={(e) => setLegalForm({ ...legalForm, bankName: e.target.value })}
-                  className="w-full rounded-md border border-slate-200 px-3 py-1.5 outline-none text-xs"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-900 outline-none focus:border-slate-400 disabled:bg-slate-50 transition-colors"
                 />
               </div>
 
               <div>
-                <label className="block font-medium text-slate-700 mb-1">Account Title</label>
+                <label
+                  htmlFor="corporate-account-title"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  Account Title
+                </label>
                 <input
+                  id="corporate-account-title"
                   type="text"
-                  required
+                  disabled={isCloudReadOnly}
                   value={legalForm.accountTitle}
                   onChange={(e) => setLegalForm({ ...legalForm, accountTitle: e.target.value })}
-                  className="w-full rounded-md border border-slate-200 px-3 py-1.5 outline-none text-xs"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-900 outline-none focus:border-slate-400 disabled:bg-slate-50 transition-colors"
                 />
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div>
-                <label className="block font-medium text-slate-700 mb-1">Corporate IBAN</label>
+                <label
+                  htmlFor="corporate-iban"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  Corporate IBAN
+                </label>
                 <input
+                  id="corporate-iban"
                   type="text"
-                  required
+                  disabled={isCloudReadOnly}
                   value={legalForm.iban}
                   onChange={(e) => setLegalForm({ ...legalForm, iban: e.target.value })}
-                  className="w-full rounded-md border border-slate-200 px-3 py-1.5 font-mono outline-none text-xs font-semibold"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono tabular-nums text-xs font-semibold text-slate-900 outline-none focus:border-slate-400 disabled:bg-slate-50 transition-colors"
                 />
               </div>
 
               <div>
-                <label className="block font-medium text-slate-700 mb-1">SWIFT / BIC Code</label>
+                <label
+                  htmlFor="corporate-swift"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
+                >
+                  SWIFT / BIC Code
+                </label>
                 <input
+                  id="corporate-swift"
                   type="text"
-                  required
+                  disabled={isCloudReadOnly}
                   value={legalForm.swiftCode}
                   onChange={(e) => setLegalForm({ ...legalForm, swiftCode: e.target.value })}
-                  className="w-full rounded-md border border-slate-200 px-3 py-1.5 font-mono outline-none text-xs"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 font-mono tabular-nums text-xs text-slate-900 outline-none focus:border-slate-400 disabled:bg-slate-50 transition-colors"
                 />
               </div>
-            </div>
-          </div>
 
-          <div className="flex justify-end">
-            <button
-              type="submit"
-              className="rounded-lg bg-slate-900 px-5 py-2 text-xs font-semibold text-white hover:bg-slate-800 shadow-xs"
-            >
-              Save Corporate Identity Details
-            </button>
-          </div>
-        </form>
-      )}
-
-      {/* TAB 2: Base Operating Currency */}
-      {activeTab === 'currency' && (
-        <div className="max-w-2xl space-y-4">
-          <div className="rounded-xl border border-slate-200 bg-white p-6 space-y-4 text-xs">
-            <div>
-              <h3 className="font-bold text-slate-900 text-sm">
-                Base Operating Currency Configuration
-              </h3>
-              <p className="text-slate-500 mt-0.5">
-                Setting the Base Currency automatically propagates and recalculates across all compensation structures, annual base salaries, expense vouchers, accounting categories, and printable templates!
-              </p>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
-              {SUPPORTED_CURRENCIES.map((c) => (
-                <div
-                  key={c.code}
-                  onClick={() => setBaseCurrency(c.code)}
-                  className={`p-4 rounded-lg border cursor-pointer transition-all ${
-                    baseCurrency === c.code
-                      ? 'border-slate-900 bg-slate-50/80 shadow-xs'
-                      : 'border-slate-200 hover:border-slate-300'
-                  }`}
+              <div>
+                <label
+                  htmlFor="corporate-base-currency"
+                  className="block text-xs font-semibold text-slate-700 mb-1.5"
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-sm text-slate-900 font-mono">
-                      {c.code} ({c.symbol})
-                    </span>
-                    {baseCurrency === c.code && (
-                      <span className="rounded bg-slate-900 text-white p-1">
-                        <Check className="h-3 w-3" />
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-slate-600 mt-1 font-medium">{c.name}</div>
-                  <div className="text-[11px] text-slate-400 font-mono mt-1">
-                    Rate: 1 {c.code} = {c.rateToSAR} SAR
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="rounded-lg bg-slate-50 border border-slate-200 p-4 font-mono text-xs text-slate-700 space-y-1">
-              <span className="font-bold text-slate-900 block font-sans">
-                Active Benchmark Verification:
-              </span>
-              <div>Example Standard Base Salary (38,000 SAR equivalent):</div>
-              <div className="text-sm font-bold text-emerald-800">
-                {formatCurrency(38000)} in {baseCurrency}
+                  Base Operating Currency
+                </label>
+                <select
+                  id="corporate-base-currency"
+                  disabled={isCloudReadOnly}
+                  value={legalForm.baseCurrency || 'SAR'}
+                  onChange={(e) => setLegalForm({ ...legalForm, baseCurrency: e.target.value })}
+                  className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-900 outline-none focus:border-slate-400 disabled:bg-slate-50 transition-colors"
+                >
+                  {SUPPORTED_CURRENCIES.map((c) => (
+                    <option key={c.code} value={c.code}>
+                      {c.code} ({c.symbol}) — {c.name}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
-          </div>
+          </section>
         </div>
-      )}
 
-      {/* TAB 3: System Access Role Tier List (All Users) */}
-      {activeTab === 'rbac' && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between text-xs">
-            <div>
-              <h3 className="font-bold text-slate-900 text-sm">
-                System Access Role Tier: All Users
-              </h3>
-              <p className="text-slate-500">
-                Active enterprise accounts, assigned tier privileges, and operational status.
-              </p>
-            </div>
-            <button
-              onClick={() => setShareAccessModalOpen(true)}
-              className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-semibold text-slate-700 hover:bg-slate-50"
-            >
-              <Mail className="h-3.5 w-3.5" />
-              <span>Invite & Share Link</span>
-            </button>
-          </div>
-
-          <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white shadow-xs">
-            <table className="w-full border-collapse text-left text-xs font-sans">
-              <thead>
-                <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold uppercase text-slate-600">
-                  <th className="px-4 py-3">User & Email</th>
-                  <th className="px-4 py-3">Department</th>
-                  <th className="px-4 py-3">Role Tier Assignment</th>
-                  <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3 text-center">Modify Tier</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {employees.map((emp) => (
-                  <tr key={emp.id} className="hover:bg-slate-50/70">
-                    <td className="px-4 py-3">
-                      <div className="font-semibold text-slate-900">{emp.fullName}</div>
-                      <div className="text-[11px] text-slate-500 font-mono">
-                        {emp.email} · ID: {emp.id}
-                      </div>
-                    </td>
-
-                    <td className="px-4 py-3 text-slate-600">{emp.department}</td>
-
-                    <td className="px-4 py-3">
-                      <span className="font-mono font-medium text-slate-800 capitalize">
-                        {emp.roleTier.replace('_', ' ')}
-                      </span>
-                    </td>
-
-                    <td className="px-4 py-3">
-                      <span className="rounded bg-emerald-50 text-emerald-700 px-2 py-0.5 text-[10px] font-semibold uppercase">
-                        {emp.status}
-                      </span>
-                    </td>
-
-                    <td className="px-4 py-3 text-center">
-                      <select
-                        value={emp.roleTier}
-                        onChange={(e) =>
-                          updateEmployee(emp.id, { roleTier: e.target.value as RoleTier })
-                        }
-                        className="rounded border border-slate-200 px-2 py-1 text-xs outline-none bg-white font-mono"
-                      >
-                        <option value="super_admin">Super Admin</option>
-                        <option value="hr_manager">HR Manager</option>
-                        <option value="finance_officer">Finance Officer</option>
-                        <option value="project_manager">Project Manager</option>
-                        <option value="employee">Employee</option>
-                      </select>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* TAB 4: Custom Privileges & Permissions */}
-      {activeTab === 'privileges' && (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between text-xs">
-            <div>
-              <h3 className="font-bold text-slate-900 text-sm">
-                Custom Privileges & Granular Permissions
-              </h3>
-              <p className="text-slate-500">
-                Define specialized privilege profiles with granular view, edit, delete, and approve rights.
-              </p>
-            </div>
-            {canPerformAdminAction && (
-              <button
-                onClick={() => {
-                  setEditingPrivId(null);
-                  setPrivForm({
-                    name: '',
-                    description: '',
-                    assignedUsersCount: 1,
-                    permissions: {
-                      canView: true,
-                      canEdit: false,
-                      canDelete: false,
-                      canApprove: false,
-                      canExportPdf: true,
-                      canManageSalary: false,
-                      canManageExpense: false,
-                      canManageTimesheet: false,
-                    },
-                  });
-                  setPrivModalOpen(true);
-                }}
-                className="flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 font-semibold text-white hover:bg-slate-800"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                <span>Create Custom Privilege</span>
-              </button>
-            )}
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {customPrivileges.map((priv) => (
-              <div
-                key={priv.id}
-                className="rounded-lg border border-slate-200 bg-white p-4 shadow-xs space-y-3 text-xs"
-              >
-                <div className="flex items-start justify-between">
-                  <div>
-                    <h4 className="font-bold text-slate-900">{priv.name}</h4>
-                    <span className="font-mono text-[10px] text-slate-400">{priv.id}</span>
-                  </div>
-                  {canPerformAdminAction && (
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => {
-                          setEditingPrivId(priv.id);
-                          setPrivForm({ ...priv });
-                          setPrivModalOpen(true);
-                        }}
-                        className="p-1 text-slate-400 hover:text-slate-700"
-                        title="Edit Privilege"
-                      >
-                        <Edit3 className="h-3.5 w-3.5" />
-                      </button>
-                      <button
-                        onClick={() => {
-                          if (window.confirm(`Delete privilege ${priv.name}?`)) {
-                            deleteCustomPrivilege(priv.id);
-                          }
-                        }}
-                        className="p-1 text-slate-400 hover:text-red-600"
-                        title="Delete Privilege"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
+        {/* Right 4 Columns: Live Official Document Letterhead & Entity Summary */}
+        <aside className="lg:col-span-4 space-y-5 lg:sticky lg:top-22">
+          <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+            {/* Preview Banner */}
+            <div className="bg-slate-900 px-5 py-4 text-white">
+              <div className="flex items-center gap-3">
+                <div className="h-11 w-11 rounded-lg bg-white/10 border border-white/15 p-1.5 flex items-center justify-center shrink-0 overflow-hidden">
+                  {!logoError && legalForm.logoUrl ? (
+                    <img
+                      src={legalForm.logoUrl}
+                      alt="Corporate Letterhead Preview"
+                      referrerPolicy="no-referrer"
+                      onError={() => setLogoError(true)}
+                      className="h-full w-full object-contain"
+                    />
+                  ) : (
+                    <Building2 className="h-5 w-5 text-slate-300" />
                   )}
                 </div>
-
-                <p className="text-slate-600 text-xs line-clamp-2">{priv.description}</p>
-
-                <div className="pt-2 border-t border-slate-100 space-y-1 text-[11px] font-mono">
-                  <div className="flex justify-between">
-                    <span>View Records:</span>
-                    <strong className={priv.permissions.canView ? 'text-emerald-700' : 'text-slate-400'}>
-                      {priv.permissions.canView ? 'Granted' : 'Denied'}
-                    </strong>
+                <div className="min-w-0">
+                  <div className="text-sm font-bold text-white truncate">
+                    {legalForm.companyName || 'Company Trading Name'}
                   </div>
-                  <div className="flex justify-between">
-                    <span>Edit / Update:</span>
-                    <strong className={priv.permissions.canEdit ? 'text-emerald-700' : 'text-slate-400'}>
-                      {priv.permissions.canEdit ? 'Granted' : 'Denied'}
-                    </strong>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Delete Authority:</span>
-                    <strong className={priv.permissions.canDelete ? 'text-rose-700' : 'text-slate-400'}>
-                      {priv.permissions.canDelete ? 'Granted' : 'Denied'}
-                    </strong>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Approval Authority:</span>
-                    <strong className={priv.permissions.canApprove ? 'text-blue-700' : 'text-slate-400'}>
-                      {priv.permissions.canApprove ? 'Granted' : 'Denied'}
-                    </strong>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Timesheet Management:</span>
-                    <strong className={priv.permissions.canManageTimesheet ? 'text-emerald-700' : 'text-slate-400'}>
-                      {priv.permissions.canManageTimesheet ? 'Granted' : 'Denied'}
-                    </strong>
+                  <div className="text-[11px] text-slate-300 truncate mt-0.5">
+                    {legalForm.legalName || 'Registered Legal Entity'}
                   </div>
                 </div>
               </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* MODAL: Create / Edit Custom Privilege */}
-      {privModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
-          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <h3 className="text-sm font-bold text-slate-900">
-                {editingPrivId ? 'Edit Custom Privilege' : 'Create Custom Privilege'}
-              </h3>
-              <button onClick={() => setPrivModalOpen(false)}>
-                <X className="h-4 w-4 text-slate-400" />
-              </button>
             </div>
-            <form onSubmit={handleSavePrivilege} className="mt-4 space-y-3 text-xs">
-              <div>
-                <label className="block font-medium text-slate-700 mb-1">Privilege Title</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. Legal & Iqama Compliance Auditor"
-                  value={privForm.name}
-                  onChange={(e) => setPrivForm({ ...privForm, name: e.target.value })}
-                  className="w-full rounded-md border border-slate-200 px-3 py-1.5 outline-none font-semibold text-xs"
-                />
+
+            {/* Official Registry Ledger Rows */}
+            <div className="p-5 space-y-4 text-xs">
+              <div className="text-[11px] font-semibold text-slate-500 border-b border-slate-100 pb-2">
+                Official Letterhead & Registry Snapshot
               </div>
 
-              <div>
-                <label className="block font-medium text-slate-700 mb-1">Description</label>
-                <textarea
-                  rows={2}
-                  required
-                  placeholder="Scope of privilege and regulatory context..."
-                  value={privForm.description}
-                  onChange={(e) => setPrivForm({ ...privForm, description: e.target.value })}
-                  className="w-full rounded-md border border-slate-200 px-3 py-1.5 outline-none"
-                />
-              </div>
+              <div className="divide-y divide-slate-100">
+                <div className="py-2.5 flex items-center justify-between gap-2">
+                  <span className="text-slate-500">CR Number</span>
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="font-mono font-semibold text-slate-900 tabular-nums truncate">
+                      {legalForm.crNumber || '—'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleCopyValue('cr', legalForm.crNumber)}
+                      className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors cursor-pointer"
+                      title="Copy CR Number"
+                    >
+                      {copiedField === 'cr' ? (
+                        <Check className="h-3.5 w-3.5 text-emerald-600" />
+                      ) : (
+                        <Copy className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
+                </div>
 
-              <div className="pt-2 border-t border-slate-100 space-y-2">
-                <span className="font-semibold text-slate-800 block uppercase tracking-wider text-[11px]">
-                  Granular Permission Switches
-                </span>
+                <div className="py-2.5 flex items-center justify-between gap-2">
+                  <span className="text-slate-500">Tax / VAT ID</span>
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="font-mono font-semibold text-slate-900 tabular-nums truncate">
+                      {legalForm.vatNumber || '—'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleCopyValue('vat', legalForm.vatNumber)}
+                      className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors cursor-pointer"
+                      title="Copy VAT Registration ID"
+                    >
+                      {copiedField === 'vat' ? (
+                        <Check className="h-3.5 w-3.5 text-emerald-600" />
+                      ) : (
+                        <Copy className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
+                </div>
 
-                <div className="grid grid-cols-2 gap-2">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={privForm.permissions.canView}
-                      onChange={(e) =>
-                        setPrivForm({
-                          ...privForm,
-                          permissions: { ...privForm.permissions, canView: e.target.checked },
-                        })
-                      }
-                    />
-                    <span>Can View Data</span>
-                  </label>
+                <div className="py-2.5 flex items-center justify-between gap-2">
+                  <span className="text-slate-500">Bank Settlement</span>
+                  <span className="font-medium text-slate-800 truncate text-right">
+                    {legalForm.bankName || '—'}
+                  </span>
+                </div>
 
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={privForm.permissions.canEdit}
-                      onChange={(e) =>
-                        setPrivForm({
-                          ...privForm,
-                          permissions: { ...privForm.permissions, canEdit: e.target.checked },
-                        })
-                      }
-                    />
-                    <span>Can Edit Data</span>
-                  </label>
+                <div className="py-2.5 flex items-center justify-between gap-2">
+                  <span className="text-slate-500">Corporate IBAN</span>
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="font-mono font-semibold text-slate-900 tabular-nums truncate max-w-[155px]">
+                      {legalForm.iban || '—'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleCopyValue('iban', legalForm.iban)}
+                      className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors cursor-pointer"
+                      title="Copy IBAN"
+                    >
+                      {copiedField === 'iban' ? (
+                        <Check className="h-3.5 w-3.5 text-emerald-600" />
+                      ) : (
+                        <Copy className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
+                </div>
 
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={privForm.permissions.canDelete}
-                      onChange={(e) =>
-                        setPrivForm({
-                          ...privForm,
-                          permissions: { ...privForm.permissions, canDelete: e.target.checked },
-                        })
-                      }
-                    />
-                    <span>Can Delete</span>
-                  </label>
-
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={privForm.permissions.canApprove}
-                      onChange={(e) =>
-                        setPrivForm({
-                          ...privForm,
-                          permissions: { ...privForm.permissions, canApprove: e.target.checked },
-                        })
-                      }
-                    />
-                    <span>Can Approve</span>
-                  </label>
-
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={privForm.permissions.canExportPdf}
-                      onChange={(e) =>
-                        setPrivForm({
-                          ...privForm,
-                          permissions: { ...privForm.permissions, canExportPdf: e.target.checked },
-                        })
-                      }
-                    />
-                    <span>Export PDF</span>
-                  </label>
-
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={privForm.permissions.canManageTimesheet}
-                      onChange={(e) =>
-                        setPrivForm({
-                          ...privForm,
-                          permissions: { ...privForm.permissions, canManageTimesheet: e.target.checked },
-                        })
-                      }
-                    />
-                    <span>Manage Timesheet</span>
-                  </label>
+                <div className="py-2.5 flex items-center justify-between gap-2">
+                  <span className="text-slate-500">SWIFT / BIC</span>
+                  <span className="font-mono text-slate-800 tabular-nums">
+                    {legalForm.swiftCode || '—'}
+                  </span>
                 </div>
               </div>
 
-              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              {/* Contact Metadata List (Unboxed, clean icons as functional indicators) */}
+              <div className="pt-3 border-t border-slate-100 space-y-2 text-[11.5px] text-slate-600">
+                <div className="flex items-start gap-2">
+                  <Mail className="h-3.5 w-3.5 text-slate-400 mt-0.5 shrink-0" />
+                  <span className="truncate">{legalForm.email || '—'}</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <Phone className="h-3.5 w-3.5 text-slate-400 mt-0.5 shrink-0" />
+                  <span className="font-mono tabular-nums">{legalForm.phone || '—'}</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <MapPin className="h-3.5 w-3.5 text-slate-400 mt-0.5 shrink-0" />
+                  <span className="leading-relaxed">{legalForm.address || '—'}</span>
+                </div>
+                <div className="flex items-start gap-2">
+                  <Landmark className="h-3.5 w-3.5 text-slate-400 mt-0.5 shrink-0" />
+                  <span className="truncate">{legalForm.accountTitle || '—'}</span>
+                </div>
+              </div>
+
+              {/* Portal Access Provisioning Trigger */}
+              <div className="pt-3 border-t border-slate-100">
                 <button
                   type="button"
-                  onClick={() => setPrivModalOpen(false)}
-                  className="rounded-lg border border-slate-200 px-3 py-1.5 text-slate-700"
+                  onClick={() => setShareAccessModalOpen(true)}
+                  className="w-full flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3.5 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-100 transition-colors whitespace-nowrap cursor-pointer"
                 >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="rounded-lg bg-slate-900 px-3.5 py-1.5 font-medium text-white hover:bg-slate-800"
-                >
-                  Save Privilege Profile
+                  <Share2 className="h-3.5 w-3.5 text-slate-600" />
+                  <span>Share User Access via Email</span>
                 </button>
               </div>
-            </form>
+            </div>
           </div>
-        </div>
-      )}
-    </div>
+        </aside>
+      </div>
+    </form>
   );
 };

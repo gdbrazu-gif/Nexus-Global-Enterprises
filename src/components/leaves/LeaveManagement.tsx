@@ -23,6 +23,7 @@ export const LeaveManagement: React.FC = () => {
     canPerformHrAction,
     canPerformAdminAction,
     employees,
+    activeBranchId,
     t,
   } = useHRMS();
 
@@ -30,6 +31,7 @@ export const LeaveManagement: React.FC = () => {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [rejectModalReq, setRejectModalReq] = useState<LeaveRequest | null>(null);
   const [rejectReason, setRejectReason] = useState('');
+  const [deleteConfirmReq, setDeleteConfirmReq] = useState<LeaveRequest | null>(null);
 
   // Form state
   const [formEmployeeId, setFormEmployeeId] = useState(employees[0]?.id || 'EMP-1001');
@@ -39,7 +41,11 @@ export const LeaveManagement: React.FC = () => {
   const [formDays, setFormDays] = useState(5);
   const [formReason, setFormReason] = useState('');
 
-  const filteredRequests = leaveRequests.filter((r) => {
+  const branchScopedLeaves = leaveRequests.filter(
+    (r) => activeBranchId === 'all' || (r.branchId || 'BR-RUH') === activeBranchId
+  );
+
+  const filteredRequests = branchScopedLeaves.filter((r) => {
     if (statusFilter === 'all') return true;
     return r.status === statusFilter;
   });
@@ -106,7 +112,7 @@ export const LeaveManagement: React.FC = () => {
                   : 'border-transparent text-slate-500 hover:text-slate-800'
               }`}
             >
-              {st} ({leaveRequests.filter((r) => st === 'all' || r.status === st).length})
+              {st} ({branchScopedLeaves.filter((r) => st === 'all' || r.status === st).length})
             </button>
           ))}
         </div>
@@ -200,16 +206,9 @@ export const LeaveManagement: React.FC = () => {
 
                     {canPerformHrAction && (
                       <button
-                        onClick={() => {
-                          if (
-                            window.confirm(
-                              `Permanently delete leave request record ${req.id}?`
-                            )
-                          ) {
-                            deleteLeaveRequest(req.id);
-                          }
-                        }}
-                        className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                        type="button"
+                        onClick={() => setDeleteConfirmReq(req)}
+                        className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 cursor-pointer"
                         title="Delete record"
                       >
                         <Trash2 className="h-4 w-4" />
@@ -365,6 +364,41 @@ export const LeaveManagement: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Delete Leave Confirmation */}
+      {deleteConfirmReq && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+          <div className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-5 shadow-xl space-y-3 text-xs">
+            <div className="flex items-center gap-2 text-red-700 font-bold text-sm">
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              <span>Delete Leave Request?</span>
+            </div>
+            <p className="text-slate-600 leading-relaxed">
+              Permanently remove leave record <strong className="font-mono">{deleteConfirmReq.id}</strong> for{' '}
+              <strong>{deleteConfirmReq.employeeName}</strong>? This action cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmReq(null)}
+                className="rounded-lg border border-slate-200 px-3 py-1.5 text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  deleteLeaveRequest(deleteConfirmReq.id);
+                  setDeleteConfirmReq(null);
+                }}
+                className="rounded-lg bg-red-600 px-3.5 py-1.5 font-semibold text-white hover:bg-red-700 cursor-pointer"
+              >
+                Confirm Delete
+              </button>
+            </div>
           </div>
         </div>
       )}

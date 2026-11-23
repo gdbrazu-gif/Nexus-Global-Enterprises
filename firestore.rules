@@ -1,0 +1,1022 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Catch-all default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // Core Auth, Identity, Schema & Branch-Scope Helpers
+    // =========================================================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function hasVerifiedEmail() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email is string;
+    }
+
+    function normalizedEmail() {
+      return request.auth.token.email.lower();
+    }
+
+    function isOwner(userId) {
+      return hasVerifiedEmail() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string
+        && id.size() >= 1
+        && id.size() <= 128
+        && id.matches('^[a-zA-Z0-9_.\\-]+$');
+    }
+
+    function isValidEmailId(id) {
+      return id is string
+        && id.size() >= 3
+        && id.size() <= 128
+        && id.matches('^[^/\\s]+@[^/\\s]+$');
+    }
+
+    function isNonEmptyStr(val, maxLen) {
+      return val is string && val.size() >= 1 && val.size() <= maxLen;
+    }
+
+    function isOptStr(data, field, maxLen) {
+      return !(field in data) || (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    function isOptNum(data, field, minVal) {
+      return !(field in data) || ((data[field] is number || data[field] is int) && data[field] >= minVal);
+    }
+
+    function isOptBoundedNum(data, field, minVal, maxVal) {
+      return !(field in data) || ((data[field] is number || data[field] is int) && data[field] >= minVal && data[field] <= maxVal);
+    }
+
+    function isOptList(data, field, maxItems) {
+      return !(field in data) || (data[field] is list && data[field].size() <= maxItems);
+    }
+
+    function isOptStringList(data, field, maxItems) {
+      return !(field in data) || (
+        data[field] is list
+        && data[field].size() <= maxItems
+        && (data[field].size() == 0 || (data[field][0] is string && data[field][0].size() <= 120))
+      );
+    }
+
+    function isOptMapList(data, field, maxItems) {
+      return !(field in data) || (
+        data[field] is list
+        && data[field].size() <= maxItems
+        && (data[field].size() == 0 || data[field][0] is map)
+      );
+    }
+
+    function isOptBool(data, field) {
+      return !(field in data) || data[field] is bool;
+    }
+
+    function isValidUpdatedBy(data) {
+      return !('updatedByUid' in data)
+        || (data.updatedByUid is string && data.updatedByUid.size() <= 128 && data.updatedByUid == request.auth.uid);
+    }
+
+    function isBootstrapAdmin() {
+      return hasVerifiedEmail()
+        && normalizedEmail() == 'gdbrazu@gmail.com';
+    }
+
+    function userDocExists() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function userDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isBootstrapAdmin()
+        || (hasVerifiedEmail() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)))
+        || (hasVerifiedEmail()
+          && userDocExists()
+          && userDoc().role == 'super_admin'
+          && userDoc().status == 'active');
+    }
+
+    function isWorkspaceMember() {
+      return isAdmin()
+        || (hasVerifiedEmail()
+          && userDocExists()
+          && userDoc().status == 'active');
+    }
+
+    function isManagerOrHr() {
+      return isAdmin()
+        || (isWorkspaceMember()
+          && userDoc().role in ['branch_admin', 'hr_manager', 'finance_officer', 'project_manager']);
+    }
+
+    function isHrOrAdmin() {
+      return isAdmin()
+        || (isWorkspaceMember()
+          && userDoc().role in ['branch_admin', 'hr_manager']);
+    }
+
+    function isAuditReader() {
+      return isAdmin()
+        || (isWorkspaceMember()
+          && userDoc().role in ['branch_admin', 'hr_manager', 'finance_officer']);
+    }
+
+    function hasBranchWriteAccess(data) {
+      return isAdmin()
+        || !('branchId' in userDoc())
+        || userDoc().branchId == 'all'
+        || !('branchId' in data)
+        || data.branchId == ''
+        || data.branchId == 'all'
+        || data.branchId == userDoc().branchId;
+    }
+
+    function hasValidInvite() {
+      return hasVerifiedEmail()
+        && exists(/databases/$(database)/documents/user_invites/$(normalizedEmail()))
+        && get(/databases/$(database)/documents/user_invites/$(normalizedEmail())).data.status == 'pending';
+    }
+
+    // =========================================================================
+    // 1. Explicit Super Admin Lookup Markers
+    // =========================================================================
+    match /admins/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isValidId(userId)
+        && (isAdmin() || (isBootstrapAdmin() && isOwner(userId)))
+        && request.resource.data.keys().hasAll(['uid', 'grantedBy', 'serverCreatedAt'])
+        && request.resource.data.keys().hasOnly(['uid', 'grantedBy', 'createdAt', 'serverCreatedAt'])
+        && request.resource.data.uid == userId
+        && isNonEmptyStr(request.resource.data.grantedBy, 128)
+        && isOptStr(request.resource.data, 'createdAt', 64)
+        && request.resource.data.serverCreatedAt == request.time;
+      allow update, delete: if isValidId(userId) && isAdmin();
+    }
+
+    // =========================================================================
+    // 2. Private User Accounts (/users/{userId}) - Strict PII Protection
+    // =========================================================================
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'branchId', 'status', 'serverUpdatedAt'])
+        && data.keys().hasOnly([
+          'uid', 'email', 'displayName', 'photoURL', 'role', 'branchId',
+          'department', 'designation', 'status', 'lastLogin',
+          'updatedByUid', 'serverCreatedAt', 'serverUpdatedAt'
+        ])
+        && data.uid == userId
+        && isNonEmptyStr(data.email, 120)
+        && isNonEmptyStr(data.displayName, 100)
+        && data.role in ['super_admin', 'branch_admin', 'hr_manager', 'finance_officer', 'project_manager', 'employee']
+        && isNonEmptyStr(data.branchId, 64)
+        && data.status in ['active', 'invited', 'suspended']
+        && isOptStr(data, 'photoURL', 1024)
+        && isOptStr(data, 'department', 80)
+        && isOptStr(data, 'designation', 100)
+        && isOptStr(data, 'lastLogin', 64)
+        && isValidUpdatedBy(data)
+        && data.serverUpdatedAt == request.time;
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+
+      allow create: if isValidId(userId)
+        && isValidUserProfile(request.resource.data, userId)
+        && 'serverCreatedAt' in request.resource.data
+        && request.resource.data.serverCreatedAt == request.time
+        && (
+          isAdmin()
+          || (isBootstrapAdmin() && isOwner(userId) && request.resource.data.role == 'super_admin' && request.resource.data.status == 'active')
+          || (isOwner(userId)
+            && hasValidInvite()
+            && request.resource.data.email.lower() == normalizedEmail()
+            && request.resource.data.role == get(/databases/$(database)/documents/user_invites/$(normalizedEmail())).data.role
+            && request.resource.data.branchId == get(/databases/$(database)/documents/user_invites/$(normalizedEmail())).data.branchId
+            && request.resource.data.status == 'active')
+        );
+
+      allow update: if isValidId(userId)
+        && isValidUserProfile(request.resource.data, userId)
+        && (
+          !('serverCreatedAt' in resource.data)
+          || request.resource.data.serverCreatedAt == resource.data.serverCreatedAt
+        )
+        && (
+          isAdmin()
+          || (isOwner(userId)
+            && hasValidInvite()
+            && request.resource.data.email.lower() == normalizedEmail()
+            && request.resource.data.role == get(/databases/$(database)/documents/user_invites/$(normalizedEmail())).data.role
+            && request.resource.data.branchId == get(/databases/$(database)/documents/user_invites/$(normalizedEmail())).data.branchId
+            && request.resource.data.status == 'active')
+          || (isOwner(userId)
+            && resource.data.status == 'active'
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.status == resource.data.status
+            && request.resource.data.branchId == resource.data.branchId
+            && request.resource.data.email.lower() == resource.data.email.lower())
+        );
+
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    // =========================================================================
+    // 3. Non-PII Team Member & Device Directory (/user_directory/{userId})
+    // =========================================================================
+    function isValidDirectoryEntry(data, userId) {
+      return data.keys().hasAll(['uid', 'displayName', 'role', 'branchId', 'status', 'serverUpdatedAt'])
+        && data.keys().hasOnly([
+          'uid', 'displayName', 'role', 'branchId', 'department', 'designation',
+          'status', 'lastDeviceType', 'lastDeviceLabel', 'lastActiveAt',
+          'updatedByUid', 'serverCreatedAt', 'serverUpdatedAt'
+        ])
+        && data.uid == userId
+        && isNonEmptyStr(data.displayName, 100)
+        && data.role in ['super_admin', 'branch_admin', 'hr_manager', 'finance_officer', 'project_manager', 'employee']
+        && isNonEmptyStr(data.branchId, 64)
+        && data.status in ['active', 'invited', 'suspended']
+        && isOptStr(data, 'department', 80)
+        && isOptStr(data, 'designation', 100)
+        && isOptStr(data, 'lastDeviceType', 24)
+        && isOptStr(data, 'lastDeviceLabel', 120)
+        && isOptStr(data, 'lastActiveAt', 64)
+        && isValidUpdatedBy(data)
+        && data.serverUpdatedAt == request.time;
+    }
+
+    match /user_directory/{userId} {
+      allow get: if isValidId(userId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(userId)
+        && isValidDirectoryEntry(request.resource.data, userId)
+        && 'serverCreatedAt' in request.resource.data
+        && request.resource.data.serverCreatedAt == request.time
+        && (
+          isAdmin()
+          || (isOwner(userId) && (isBootstrapAdmin() || isWorkspaceMember() || hasValidInvite()))
+        );
+      allow update: if isValidId(userId)
+        && isValidDirectoryEntry(request.resource.data, userId)
+        && (
+          !('serverCreatedAt' in resource.data)
+          || request.resource.data.serverCreatedAt == resource.data.serverCreatedAt
+        )
+        && (
+          isAdmin()
+          || (isOwner(userId)
+            && hasValidInvite()
+            && request.resource.data.role == get(/databases/$(database)/documents/user_invites/$(normalizedEmail())).data.role
+            && request.resource.data.branchId == get(/databases/$(database)/documents/user_invites/$(normalizedEmail())).data.branchId
+            && request.resource.data.status == 'active')
+          || (isOwner(userId)
+            && isWorkspaceMember()
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.status == resource.data.status
+            && request.resource.data.branchId == resource.data.branchId)
+        );
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    // =========================================================================
+    // 4. User Invitations (/user_invites/{inviteEmail})
+    // =========================================================================
+    function isValidUserInvite(data, inviteEmail) {
+      return data.keys().hasAll(['id', 'email', 'displayName', 'role', 'branchId', 'status', 'invitedByUid', 'serverUpdatedAt'])
+        && data.keys().hasOnly([
+          'id', 'email', 'displayName', 'role', 'branchId', 'department',
+          'designation', 'status', 'hasAccessPasscode', 'accessPasscodeHash',
+          'invitedByUid', 'createdAt', 'updatedByUid', 'serverCreatedAt', 'serverUpdatedAt'
+        ])
+        && data.id == inviteEmail
+        && data.email == inviteEmail
+        && isNonEmptyStr(data.displayName, 100)
+        && data.role in ['super_admin', 'branch_admin', 'hr_manager', 'finance_officer', 'project_manager', 'employee']
+        && isNonEmptyStr(data.branchId, 64)
+        && data.status in ['pending', 'claimed']
+        && isOptBool(data, 'hasAccessPasscode')
+        && isOptStr(data, 'accessPasscodeHash', 128)
+        && isNonEmptyStr(data.invitedByUid, 128)
+        && isOptStr(data, 'department', 80)
+        && isOptStr(data, 'designation', 100)
+        && isOptStr(data, 'createdAt', 64)
+        && isValidUpdatedBy(data)
+        && data.serverUpdatedAt == request.time;
+    }
+
+    match /user_invites/{inviteEmail} {
+      allow get: if isValidEmailId(inviteEmail)
+        && (isAdmin() || (hasVerifiedEmail() && normalizedEmail() == inviteEmail.lower()));
+      allow list: if isAdmin();
+      allow create: if isValidEmailId(inviteEmail)
+        && isAdmin()
+        && isValidUserInvite(request.resource.data, inviteEmail)
+        && request.resource.data.invitedByUid == request.auth.uid
+        && 'serverCreatedAt' in request.resource.data
+        && request.resource.data.serverCreatedAt == request.time;
+      allow update: if isValidEmailId(inviteEmail)
+        && isValidUserInvite(request.resource.data, inviteEmail)
+        && (
+          !('serverCreatedAt' in resource.data)
+          || request.resource.data.serverCreatedAt == resource.data.serverCreatedAt
+        )
+        && (
+          isAdmin()
+          || (hasVerifiedEmail()
+            && normalizedEmail() == inviteEmail.lower()
+            && resource.data.status == 'pending'
+            && request.resource.data.status == 'claimed'
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.branchId == resource.data.branchId
+            && request.resource.data.email == resource.data.email
+            && request.resource.data.invitedByUid == resource.data.invitedByUid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedByUid', 'serverUpdatedAt']))
+        );
+      allow delete: if isValidEmailId(inviteEmail) && isAdmin();
+    }
+
+    // =========================================================================
+    // 5. Device Sessions (/device_sessions/{sessionId}) - Strict Owner/Admin Scope
+    // =========================================================================
+    function isValidDeviceSession(data, sessionId) {
+      return data.keys().hasAll(['id', 'uid', 'userName', 'deviceType', 'branchId', 'lastSeenAt', 'serverUpdatedAt'])
+        && data.keys().hasOnly(['id', 'uid', 'userName', 'deviceType', 'platform', 'browser', 'branchId', 'lastSeenAt', 'createdAt', 'updatedByUid', 'serverUpdatedAt'])
+        && data.id == sessionId
+        && isNonEmptyStr(data.uid, 128)
+        && isNonEmptyStr(data.userName, 100)
+        && data.deviceType in ['Desktop', 'Tablet', 'Mobile']
+        && isNonEmptyStr(data.branchId, 64)
+        && isNonEmptyStr(data.lastSeenAt, 64)
+        && isOptStr(data, 'platform', 64)
+        && isOptStr(data, 'browser', 64)
+        && isOptStr(data, 'createdAt', 64)
+        && isValidUpdatedBy(data)
+        && data.serverUpdatedAt == request.time;
+    }
+
+    match /device_sessions/{sessionId} {
+      allow get: if isValidId(sessionId) && (isAdmin() || (isWorkspaceMember() && resource.data.uid == request.auth.uid));
+      allow list: if isAdmin() || (isWorkspaceMember() && resource.data.uid == request.auth.uid);
+      allow create: if isValidId(sessionId)
+        && isWorkspaceMember()
+        && isValidDeviceSession(request.resource.data, sessionId)
+        && (isAdmin() || request.resource.data.uid == request.auth.uid);
+      allow update: if isValidId(sessionId)
+        && isWorkspaceMember()
+        && isValidDeviceSession(request.resource.data, sessionId)
+        && (isAdmin() || (resource.data.uid == request.auth.uid && request.resource.data.uid == request.auth.uid));
+      allow delete: if isValidId(sessionId) && (isAdmin() || (isWorkspaceMember() && resource.data.uid == request.auth.uid));
+    }
+
+    // =========================================================================
+    // 6. Multi-Branch Registry (/branches/{branchId})
+    // =========================================================================
+    match /branches/{branchId} {
+      allow get: if isValidId(branchId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create, update: if isValidId(branchId)
+        && isAdmin()
+        && request.resource.data.keys().hasAll(['id', 'code', 'name', 'city', 'country', 'status', 'serverUpdatedAt'])
+        && request.resource.data.keys().hasOnly([
+          'id', 'code', 'name', 'city', 'region', 'country', 'address', 'phone',
+          'email', 'managerName', 'isHeadquarters', 'status', 'createdAt', 'updatedAt',
+          'updatedByUid', 'serverUpdatedAt'
+        ])
+        && request.resource.data.id == branchId
+        && isNonEmptyStr(request.resource.data.code, 32)
+        && isNonEmptyStr(request.resource.data.name, 120)
+        && isNonEmptyStr(request.resource.data.city, 80)
+        && isNonEmptyStr(request.resource.data.country, 80)
+        && request.resource.data.status in ['active', 'inactive', 'opening_soon']
+        && isOptBool(request.resource.data, 'isHeadquarters')
+        && isOptStr(request.resource.data, 'region', 80)
+        && isOptStr(request.resource.data, 'address', 300)
+        && isOptStr(request.resource.data, 'phone', 40)
+        && isOptStr(request.resource.data, 'email', 120)
+        && isOptStr(request.resource.data, 'managerName', 100)
+        && isOptStr(request.resource.data, 'createdAt', 64)
+        && isOptStr(request.resource.data, 'updatedAt', 64)
+        && isValidUpdatedBy(request.resource.data)
+        && request.resource.data.serverUpdatedAt == request.time;
+      allow delete: if isValidId(branchId) && isAdmin();
+    }
+
+    // =========================================================================
+    // 7. Employees Directory (/employees/{employeeId}) - Restricted Read & Branch Write Scope
+    // =========================================================================
+    function isValidEmployeeAdvance(data) {
+      return !('advance' in data) || (
+        data.advance is map
+        && data.advance.keys().hasOnly([
+          'hasAdvance', 'amountSAR', 'purpose', 'installmentsCount',
+          'monthlyDeductionSAR', 'disbursementDate', 'disbursementMethod',
+          'voucherNumber', 'notes'
+        ])
+        && isOptBool(data.advance, 'hasAdvance')
+        && isOptNum(data.advance, 'amountSAR', 0)
+        && isOptStr(data.advance, 'purpose', 300)
+        && isOptBoundedNum(data.advance, 'installmentsCount', 0, 360)
+        && isOptNum(data.advance, 'monthlyDeductionSAR', 0)
+        && isOptStr(data.advance, 'disbursementDate', 64)
+        && isOptStr(data.advance, 'disbursementMethod', 64)
+        && isOptStr(data.advance, 'voucherNumber', 64)
+        && isOptStr(data.advance, 'notes', 500)
+      );
+    }
+
+    function isValidEmployeeRecord(data, employeeId) {
+      return data.keys().hasAll(['id', 'fullName', 'department', 'roleTier', 'status', 'serverUpdatedAt'])
+        && data.keys().hasOnly([
+          'id', 'fullName', 'email', 'phone', 'profileImage', 'department', 'operatingDepartment',
+          'designation', 'roleTier', 'nationality', 'iqamaNationalId', 'passportNumber',
+          'passportExpiry', 'joiningDate', 'status', 'employmentType', 'monthlyBaseSalary',
+          'housingAllowance', 'transportAllowance', 'otherAllowances', 'annualBaseSalary',
+          'totalMonthlyPackage', 'managerName', 'bankIban', 'gender', 'dateOfBirth',
+          'bloodGroup', 'workLocation', 'probationPeriodMonths', 'noticePeriodDays',
+          'emergencyContactName', 'emergencyContactPhone', 'emergencyContactRelationship',
+          'bankName', 'advance', 'isOutsourced', 'supplierId', 'supplierName',
+          'outsourcedWorkerId', 'trade', 'assignedProjectId', 'assignedProjectName',
+          'branchId', 'updatedByUid', 'serverUpdatedAt'
+        ])
+        && data.id == employeeId
+        && isNonEmptyStr(data.fullName, 120)
+        && isNonEmptyStr(data.department, 160)
+        && data.roleTier in ['super_admin', 'branch_admin', 'hr_manager', 'finance_officer', 'project_manager', 'employee']
+        && data.status in ['active', 'on_leave', 'probation', 'inactive']
+        && isOptStr(data, 'email', 120)
+        && isOptStr(data, 'phone', 40)
+        && isOptStr(data, 'profileImage', 65536)
+        && isOptStr(data, 'operatingDepartment', 160)
+        && isOptStr(data, 'designation', 160)
+        && isOptStr(data, 'nationality', 80)
+        && isOptStr(data, 'iqamaNationalId', 64)
+        && isOptStr(data, 'passportNumber', 64)
+        && isOptStr(data, 'passportExpiry', 64)
+        && isOptStr(data, 'joiningDate', 64)
+        && isOptStr(data, 'employmentType', 64)
+        && isOptStr(data, 'managerName', 120)
+        && isOptStr(data, 'bankIban', 64)
+        && isOptStr(data, 'bankName', 120)
+        && isOptStr(data, 'gender', 32)
+        && isOptStr(data, 'dateOfBirth', 64)
+        && isOptStr(data, 'bloodGroup', 32)
+        && isOptStr(data, 'workLocation', 200)
+        && isOptStr(data, 'emergencyContactName', 120)
+        && isOptStr(data, 'emergencyContactPhone', 40)
+        && isOptStr(data, 'emergencyContactRelationship', 40)
+        && isOptStr(data, 'supplierId', 64)
+        && isOptStr(data, 'supplierName', 120)
+        && isOptStr(data, 'outsourcedWorkerId', 64)
+        && isOptStr(data, 'trade', 80)
+        && isOptStr(data, 'assignedProjectId', 64)
+        && isOptStr(data, 'assignedProjectName', 160)
+        && isOptStr(data, 'branchId', 64)
+        && isOptBool(data, 'isOutsourced')
+        && isValidEmployeeAdvance(data)
+        && isOptNum(data, 'monthlyBaseSalary', 0)
+        && isOptNum(data, 'housingAllowance', 0)
+        && isOptNum(data, 'transportAllowance', 0)
+        && isOptNum(data, 'otherAllowances', 0)
+        && isOptNum(data, 'annualBaseSalary', 0)
+        && isOptNum(data, 'totalMonthlyPackage', 0)
+        && isOptBoundedNum(data, 'probationPeriodMonths', 0, 120)
+        && isOptBoundedNum(data, 'noticePeriodDays', 0, 730)
+        && isValidUpdatedBy(data)
+        && data.serverUpdatedAt == request.time;
+    }
+
+    match /employees/{employeeId} {
+      allow get: if isValidId(employeeId)
+        && (isManagerOrHr()
+          || (isWorkspaceMember()
+            && 'email' in resource.data
+            && resource.data.email is string
+            && resource.data.email.lower() == normalizedEmail()));
+      allow list: if isManagerOrHr();
+      allow create: if isValidId(employeeId)
+        && isHrOrAdmin()
+        && isValidEmployeeRecord(request.resource.data, employeeId)
+        && hasBranchWriteAccess(request.resource.data);
+      allow update: if isValidId(employeeId)
+        && isHrOrAdmin()
+        && isValidEmployeeRecord(request.resource.data, employeeId)
+        && hasBranchWriteAccess(resource.data)
+        && hasBranchWriteAccess(request.resource.data);
+      allow delete: if isValidId(employeeId) && isAdmin();
+    }
+
+    // =========================================================================
+    // 8. Bounded Operational Record Collections (Branch & Role Scoped)
+    // =========================================================================
+    function isValidGenericRecord(data, docId) {
+      return data.keys().hasAll(['id', 'serverUpdatedAt'])
+        && data.id == docId
+        && isOptStr(data, 'branchId', 64)
+        && isValidUpdatedBy(data)
+        && data.serverUpdatedAt == request.time;
+    }
+
+    match /departments/{deptId} {
+      allow get: if isValidId(deptId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(deptId) && isHrOrAdmin()
+        && isValidGenericRecord(request.resource.data, deptId)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'name', 'code', 'operatingUnit', 'headEmployeeId', 'headEmployeeName', 'location', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptStr(request.resource.data, 'name', 120)
+        && isOptStr(request.resource.data, 'code', 32)
+        && isOptStr(request.resource.data, 'operatingUnit', 120)
+        && isOptStr(request.resource.data, 'location', 160);
+      allow update: if isValidId(deptId) && isHrOrAdmin()
+        && isValidGenericRecord(request.resource.data, deptId)
+        && hasBranchWriteAccess(resource.data)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'name', 'code', 'operatingUnit', 'headEmployeeId', 'headEmployeeName', 'location', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptStr(request.resource.data, 'name', 120)
+        && isOptStr(request.resource.data, 'code', 32)
+        && isOptStr(request.resource.data, 'operatingUnit', 120)
+        && isOptStr(request.resource.data, 'location', 160);
+      allow delete: if isValidId(deptId) && isAdmin();
+    }
+
+    match /designations/{desId} {
+      allow get: if isValidId(desId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(desId) && isHrOrAdmin()
+        && isValidGenericRecord(request.resource.data, desId)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'title', 'departmentId', 'gradeLevel', 'minSalary', 'maxSalary', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptStr(request.resource.data, 'title', 120)
+        && isOptNum(request.resource.data, 'minSalary', 0)
+        && isOptNum(request.resource.data, 'maxSalary', 0);
+      allow update: if isValidId(desId) && isHrOrAdmin()
+        && isValidGenericRecord(request.resource.data, desId)
+        && hasBranchWriteAccess(resource.data)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'title', 'departmentId', 'gradeLevel', 'minSalary', 'maxSalary', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptStr(request.resource.data, 'title', 120)
+        && isOptNum(request.resource.data, 'minSalary', 0)
+        && isOptNum(request.resource.data, 'maxSalary', 0);
+      allow delete: if isValidId(desId) && isAdmin();
+    }
+
+    match /timesheet_entries/{entryId} {
+      allow get: if isValidId(entryId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(entryId) && isWorkspaceMember()
+        && isValidGenericRecord(request.resource.data, entryId)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'employeeId', 'date', 'regularHours', 'overtimeHours', 'status', 'notes', 'updatedBy', 'updatedAt', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptBoundedNum(request.resource.data, 'regularHours', 0, 24)
+        && isOptBoundedNum(request.resource.data, 'overtimeHours', 0, 24)
+        && isOptStr(request.resource.data, 'status', 32)
+        && isOptStr(request.resource.data, 'notes', 300);
+      allow update: if isValidId(entryId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, entryId)
+        && hasBranchWriteAccess(resource.data)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'employeeId', 'date', 'regularHours', 'overtimeHours', 'status', 'notes', 'updatedBy', 'updatedAt', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptBoundedNum(request.resource.data, 'regularHours', 0, 24)
+        && isOptBoundedNum(request.resource.data, 'overtimeHours', 0, 24)
+        && isOptStr(request.resource.data, 'status', 32)
+        && isOptStr(request.resource.data, 'notes', 300);
+      allow delete: if isValidId(entryId) && isManagerOrHr() && hasBranchWriteAccess(resource.data);
+    }
+
+    match /leave_requests/{leaveId} {
+      allow get: if isValidId(leaveId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(leaveId) && isWorkspaceMember()
+        && isValidGenericRecord(request.resource.data, leaveId)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'employeeId', 'employeeName', 'department', 'leaveType', 'startDate', 'endDate', 'totalDays', 'reason', 'status', 'reviewedBy', 'reviewDate', 'rejectionReason', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptNum(request.resource.data, 'totalDays', 0)
+        && isOptStr(request.resource.data, 'reason', 500)
+        && (isManagerOrHr()
+          || (request.resource.data.status == 'pending'
+            && !('reviewedBy' in request.resource.data)
+            && !('reviewDate' in request.resource.data)
+            && !('rejectionReason' in request.resource.data)));
+      allow update: if isValidId(leaveId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, leaveId)
+        && hasBranchWriteAccess(resource.data)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'employeeId', 'employeeName', 'department', 'leaveType', 'startDate', 'endDate', 'totalDays', 'reason', 'status', 'reviewedBy', 'reviewDate', 'rejectionReason', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptNum(request.resource.data, 'totalDays', 0)
+        && isOptStr(request.resource.data, 'reason', 500);
+      allow delete: if isValidId(leaveId) && isManagerOrHr() && hasBranchWriteAccess(resource.data);
+    }
+
+    match /accounting_categories/{catId} {
+      allow get: if isValidId(catId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(catId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, catId)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'code', 'name', 'type', 'description', 'budgetCapSAR', 'status', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptStr(request.resource.data, 'code', 32)
+        && isOptStr(request.resource.data, 'name', 120)
+        && isOptStr(request.resource.data, 'description', 500)
+        && isOptStr(request.resource.data, 'status', 32)
+        && isOptNum(request.resource.data, 'budgetCapSAR', 0);
+      allow update: if isValidId(catId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, catId)
+        && hasBranchWriteAccess(resource.data)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'code', 'name', 'type', 'description', 'budgetCapSAR', 'status', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptStr(request.resource.data, 'code', 32)
+        && isOptStr(request.resource.data, 'name', 120)
+        && isOptStr(request.resource.data, 'description', 500)
+        && isOptStr(request.resource.data, 'status', 32)
+        && isOptNum(request.resource.data, 'budgetCapSAR', 0);
+      allow delete: if isValidId(catId) && isAdmin();
+    }
+
+    match /expenses/{expenseId} {
+      allow get: if isValidId(expenseId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(expenseId) && isWorkspaceMember()
+        && isValidGenericRecord(request.resource.data, expenseId)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'expenseNumber', 'categoryId', 'categoryName', 'title', 'amountSAR', 'vendor', 'date', 'projectId', 'projectName', 'submittedBy', 'status', 'receiptRef', 'notes', 'approvedBy', 'approvalDate', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptNum(request.resource.data, 'amountSAR', 0)
+        && isOptStr(request.resource.data, 'title', 200)
+        && isOptStr(request.resource.data, 'notes', 500)
+        && (isManagerOrHr()
+          || (request.resource.data.status == 'pending'
+            && !('approvedBy' in request.resource.data)
+            && !('approvalDate' in request.resource.data)));
+      allow update: if isValidId(expenseId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, expenseId)
+        && hasBranchWriteAccess(resource.data)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'expenseNumber', 'categoryId', 'categoryName', 'title', 'amountSAR', 'vendor', 'date', 'projectId', 'projectName', 'submittedBy', 'status', 'receiptRef', 'notes', 'approvedBy', 'approvalDate', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptNum(request.resource.data, 'amountSAR', 0)
+        && isOptStr(request.resource.data, 'title', 200)
+        && isOptStr(request.resource.data, 'notes', 500);
+      allow delete: if isValidId(expenseId) && isAdmin();
+    }
+
+    match /projects/{projectId} {
+      allow get: if isValidId(projectId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(projectId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, projectId)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'code', 'name', 'client', 'department', 'location', 'budgetSAR', 'spentSAR', 'startDate', 'endDate', 'status', 'leadName', 'assignedEmployeeId', 'assignedEmployeeName', 'assignedTeam', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptList(request.resource.data, 'assignedTeam', 200)
+        && isOptNum(request.resource.data, 'budgetSAR', 0)
+        && isOptNum(request.resource.data, 'spentSAR', 0);
+      allow update: if isValidId(projectId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, projectId)
+        && hasBranchWriteAccess(resource.data)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'code', 'name', 'client', 'department', 'location', 'budgetSAR', 'spentSAR', 'startDate', 'endDate', 'status', 'leadName', 'assignedEmployeeId', 'assignedEmployeeName', 'assignedTeam', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptList(request.resource.data, 'assignedTeam', 200)
+        && isOptNum(request.resource.data, 'budgetSAR', 0)
+        && isOptNum(request.resource.data, 'spentSAR', 0);
+      allow delete: if isValidId(projectId) && isAdmin();
+    }
+
+    match /villas/{villaId} {
+      allow get: if isValidId(villaId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(villaId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, villaId)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'blockNo', 'villaNo', 'villaType', 'villaQuantity', 'customVilla', 'customVillaSpecification', 'projectId', 'projectName', 'assignedEmployeeId', 'assignedEmployeeName', 'floors', 'bedrooms', 'builtUpAreaSqm', 'plotAreaSqm', 'estimatedCostSAR', 'contractPriceSAR', 'constructionStatus', 'handoverTargetDate', 'clientName', 'contractorName', 'notes', 'dailyWorkEntities', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptMapList(request.resource.data, 'dailyWorkEntities', 500)
+        && isOptNum(request.resource.data, 'estimatedCostSAR', 0)
+        && isOptNum(request.resource.data, 'contractPriceSAR', 0);
+      allow update: if isValidId(villaId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, villaId)
+        && hasBranchWriteAccess(resource.data)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'blockNo', 'villaNo', 'villaType', 'villaQuantity', 'customVilla', 'customVillaSpecification', 'projectId', 'projectName', 'assignedEmployeeId', 'assignedEmployeeName', 'floors', 'bedrooms', 'builtUpAreaSqm', 'plotAreaSqm', 'estimatedCostSAR', 'contractPriceSAR', 'constructionStatus', 'handoverTargetDate', 'clientName', 'contractorName', 'notes', 'dailyWorkEntities', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptMapList(request.resource.data, 'dailyWorkEntities', 500)
+        && isOptNum(request.resource.data, 'estimatedCostSAR', 0)
+        && isOptNum(request.resource.data, 'contractPriceSAR', 0);
+      allow delete: if isValidId(villaId) && isManagerOrHr() && hasBranchWriteAccess(resource.data);
+    }
+
+    match /asset_categories/{catId} {
+      allow get: if isValidId(catId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(catId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, catId)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'name', 'code', 'description', 'assetsCount', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptStr(request.resource.data, 'name', 120)
+        && isOptStr(request.resource.data, 'code', 32)
+        && isOptStr(request.resource.data, 'description', 500)
+        && isOptNum(request.resource.data, 'assetsCount', 0);
+      allow update: if isValidId(catId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, catId)
+        && hasBranchWriteAccess(resource.data)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'name', 'code', 'description', 'assetsCount', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptStr(request.resource.data, 'name', 120)
+        && isOptStr(request.resource.data, 'code', 32)
+        && isOptStr(request.resource.data, 'description', 500)
+        && isOptNum(request.resource.data, 'assetsCount', 0);
+      allow delete: if isValidId(catId) && isAdmin();
+    }
+
+    match /assets/{assetId} {
+      allow get: if isValidId(assetId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(assetId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, assetId)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'assetTag', 'name', 'categoryId', 'categoryName', 'serialNumber', 'assignedToEmployeeId', 'assignedToEmployeeName', 'purchaseDate', 'costSAR', 'warrantyExpiry', 'status', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptNum(request.resource.data, 'costSAR', 0);
+      allow update: if isValidId(assetId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, assetId)
+        && hasBranchWriteAccess(resource.data)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'assetTag', 'name', 'categoryId', 'categoryName', 'serialNumber', 'assignedToEmployeeId', 'assignedToEmployeeName', 'purchaseDate', 'costSAR', 'warrantyExpiry', 'status', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptNum(request.resource.data, 'costSAR', 0);
+      allow delete: if isValidId(assetId) && isAdmin();
+    }
+
+    match /manpower_suppliers/{supplierId} {
+      allow get: if isValidId(supplierId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(supplierId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, supplierId)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'code', 'name', 'legalEntityName', 'crNumber', 'vatNumber', 'contactPerson', 'email', 'phone', 'city', 'address', 'agreementStartDate', 'agreementEndDate', 'status', 'suppliedTrades', 'deployedWorkersCount', 'paymentTerms', 'complianceScore', 'totalInvoicedSAR', 'notes', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptStringList(request.resource.data, 'suppliedTrades', 100);
+      allow update: if isValidId(supplierId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, supplierId)
+        && hasBranchWriteAccess(resource.data)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'code', 'name', 'legalEntityName', 'crNumber', 'vatNumber', 'contactPerson', 'email', 'phone', 'city', 'address', 'agreementStartDate', 'agreementEndDate', 'status', 'suppliedTrades', 'deployedWorkersCount', 'paymentTerms', 'complianceScore', 'totalInvoicedSAR', 'notes', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptStringList(request.resource.data, 'suppliedTrades', 100);
+      allow delete: if isValidId(supplierId) && isAdmin();
+    }
+
+    match /supplied_workers/{workerId} {
+      allow get: if isValidId(workerId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(workerId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, workerId)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'supplierId', 'supplierName', 'fullName', 'designation', 'trade', 'assignedProjectId', 'assignedProjectName', 'iqamaOrWorkPermit', 'hourlyRateSAR', 'monthlyHoursLogged', 'status', 'joiningDate', 'contactPhone', 'linkedEmployeeId', 'isAddedToDirectory', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptNum(request.resource.data, 'hourlyRateSAR', 0);
+      allow update: if isValidId(workerId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, workerId)
+        && hasBranchWriteAccess(resource.data)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'supplierId', 'supplierName', 'fullName', 'designation', 'trade', 'assignedProjectId', 'assignedProjectName', 'iqamaOrWorkPermit', 'hourlyRateSAR', 'monthlyHoursLogged', 'status', 'joiningDate', 'contactPhone', 'linkedEmployeeId', 'isAddedToDirectory', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptNum(request.resource.data, 'hourlyRateSAR', 0);
+      allow delete: if isValidId(workerId) && isAdmin();
+    }
+
+    match /manpower_pos/{posId} {
+      allow get: if isValidId(posId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(posId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, posId)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'posNumber', 'supplierId', 'supplierName', 'issueDate', 'commencementDate', 'completionDate', 'projectId', 'projectName', 'scopeOfWork', 'lineItems', 'subtotalSAR', 'vatRate', 'vatAmountSAR', 'grandTotalSAR', 'paymentTerms', 'status', 'authorizedBy', 'notes', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptMapList(request.resource.data, 'lineItems', 200)
+        && isOptNum(request.resource.data, 'grandTotalSAR', 0);
+      allow update: if isValidId(posId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, posId)
+        && hasBranchWriteAccess(resource.data)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'posNumber', 'supplierId', 'supplierName', 'issueDate', 'commencementDate', 'completionDate', 'projectId', 'projectName', 'scopeOfWork', 'lineItems', 'subtotalSAR', 'vatRate', 'vatAmountSAR', 'grandTotalSAR', 'paymentTerms', 'status', 'authorizedBy', 'notes', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptMapList(request.resource.data, 'lineItems', 200)
+        && isOptNum(request.resource.data, 'grandTotalSAR', 0);
+      allow delete: if isValidId(posId) && isAdmin();
+    }
+
+    match /inventory_items/{itemId} {
+      allow get: if isValidId(itemId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(itemId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, itemId)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'sku', 'name', 'category', 'description', 'warehouseLocation', 'quantityOnHand', 'minReorderLevel', 'maxStockLevel', 'unitOfMeasure', 'unitCostSAR', 'supplierName', 'lastRestockedDate', 'status', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptNum(request.resource.data, 'quantityOnHand', 0)
+        && isOptNum(request.resource.data, 'unitCostSAR', 0);
+      allow update: if isValidId(itemId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, itemId)
+        && hasBranchWriteAccess(resource.data)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'sku', 'name', 'category', 'description', 'warehouseLocation', 'quantityOnHand', 'minReorderLevel', 'maxStockLevel', 'unitOfMeasure', 'unitCostSAR', 'supplierName', 'lastRestockedDate', 'status', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptNum(request.resource.data, 'quantityOnHand', 0)
+        && isOptNum(request.resource.data, 'unitCostSAR', 0);
+      allow delete: if isValidId(itemId) && isManagerOrHr() && hasBranchWriteAccess(resource.data);
+    }
+
+    match /stock_movements/{movementId} {
+      allow get: if isValidId(movementId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(movementId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, movementId)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'itemId', 'itemName', 'type', 'quantity', 'date', 'referenceDoc', 'operatorName', 'notes', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && (!('type' in request.resource.data) || request.resource.data.type in ['IN', 'OUT', 'ADJUSTMENT'])
+        && isOptNum(request.resource.data, 'quantity', 0)
+        && isOptStr(request.resource.data, 'operatorName', 120)
+        && isOptStr(request.resource.data, 'notes', 500);
+      allow update, delete: if isValidId(movementId) && isAdmin();
+    }
+
+    match /inventory_invoices/{invoiceId} {
+      allow get: if isValidId(invoiceId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(invoiceId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, invoiceId)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'invoiceNumber', 'date', 'dueDate', 'type', 'clientOrVendor', 'contactPerson', 'referenceDoc', 'lineItems', 'subtotalSAR', 'vatRate', 'vatAmountSAR', 'grandTotalSAR', 'paymentTerms', 'status', 'notes', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptMapList(request.resource.data, 'lineItems', 200)
+        && isOptNum(request.resource.data, 'grandTotalSAR', 0);
+      allow update: if isValidId(invoiceId) && isManagerOrHr()
+        && isValidGenericRecord(request.resource.data, invoiceId)
+        && hasBranchWriteAccess(resource.data)
+        && hasBranchWriteAccess(request.resource.data)
+        && request.resource.data.keys().hasOnly(['id', 'invoiceNumber', 'date', 'dueDate', 'type', 'clientOrVendor', 'contactPerson', 'referenceDoc', 'lineItems', 'subtotalSAR', 'vatRate', 'vatAmountSAR', 'grandTotalSAR', 'paymentTerms', 'status', 'notes', 'branchId', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptMapList(request.resource.data, 'lineItems', 200)
+        && isOptNum(request.resource.data, 'grandTotalSAR', 0);
+      allow delete: if isValidId(invoiceId) && isManagerOrHr() && hasBranchWriteAccess(resource.data);
+    }
+
+    // =========================================================================
+    // 9. Settings, Template Configs, RBAC & Custom Privileges
+    // =========================================================================
+    function isValidCorporateSettings(data, settingId) {
+      return data.keys().hasAll(['id', 'serverUpdatedAt'])
+        && data.id == settingId
+        && data.keys().hasOnly([
+          'id', 'companyName', 'legalName', 'logoUrl', 'crNumber', 'vatNumber',
+          'email', 'phone', 'address', 'bankName', 'accountTitle', 'iban', 'swiftCode',
+          'baseCurrency', 'customVillaTypes', 'manpowerTrades', 'inventoryCategories',
+          'inventoryUOMs', 'inventoryWarehouses', 'updatedByUid', 'serverUpdatedAt'
+        ])
+        && isOptStr(data, 'companyName', 160)
+        && isOptStr(data, 'legalName', 200)
+        && isOptStr(data, 'logoUrl', 65536)
+        && isOptStr(data, 'crNumber', 64)
+        && isOptStr(data, 'vatNumber', 64)
+        && isOptStr(data, 'email', 120)
+        && isOptStr(data, 'phone', 40)
+        && isOptStr(data, 'address', 300)
+        && isOptStr(data, 'bankName', 120)
+        && isOptStr(data, 'accountTitle', 160)
+        && isOptStr(data, 'iban', 64)
+        && isOptStr(data, 'swiftCode', 32)
+        && isOptStr(data, 'baseCurrency', 16)
+        && isOptStringList(data, 'customVillaTypes', 200)
+        && isOptStringList(data, 'manpowerTrades', 200)
+        && isOptStringList(data, 'inventoryCategories', 200)
+        && isOptStringList(data, 'inventoryUOMs', 200)
+        && isOptStringList(data, 'inventoryWarehouses', 200)
+        && isValidUpdatedBy(data)
+        && data.serverUpdatedAt == request.time;
+    }
+
+    match /corporate_settings/{settingId} {
+      allow get: if isValidId(settingId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create: if isValidId(settingId) && isAdmin()
+        && isValidCorporateSettings(request.resource.data, settingId);
+      allow update: if isValidId(settingId)
+        && isValidCorporateSettings(request.resource.data, settingId)
+        && (
+          isAdmin()
+          || (isManagerOrHr()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'customVillaTypes', 'manpowerTrades', 'inventoryCategories', 'inventoryUOMs',
+              'inventoryWarehouses', 'updatedByUid', 'serverUpdatedAt'
+            ]))
+        );
+      allow delete: if isValidId(settingId) && isAdmin();
+    }
+
+    match /template_configs/{templateId} {
+      allow get: if isValidId(templateId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create, update: if isValidId(templateId) && isManagerOrHr()
+        && request.resource.data.keys().hasAll(['id', 'title', 'serverUpdatedAt'])
+        && request.resource.data.id == templateId
+        && request.resource.data.keys().hasOnly([
+          'id', 'title', 'subtitle', 'showLogo', 'logoPosition', 'accentColor',
+          'showWatermark', 'watermarkText', 'showLegalEntity', 'showSignatures',
+          'showQrStamp', 'footerNote', 'letterheadHeaderStyle', 'headerCompanyName',
+          'headerLegalName', 'headerCrNumber', 'headerVatNumber', 'headerAddress',
+          'headerPhone', 'headerEmail', 'headerWebsite', 'customLogoUrl',
+          'showContactFooterBar', 'refNumber', 'documentDate', 'showRecipientBlock',
+          'recipientName', 'recipientTitle', 'recipientOrganization', 'subjectLine',
+          'bodyContent', 'signatoryName', 'signatoryTitle', 'recipientSignatoryLabel',
+          'updatedByUid', 'serverUpdatedAt'
+        ])
+        && isNonEmptyStr(request.resource.data.title, 160)
+        && isOptStr(request.resource.data, 'customLogoUrl', 65536)
+        && isOptStr(request.resource.data, 'bodyContent', 20000)
+        && isValidUpdatedBy(request.resource.data)
+        && request.resource.data.serverUpdatedAt == request.time;
+      allow delete: if isValidId(templateId) && isAdmin();
+    }
+
+    match /custom_privileges/{privId} {
+      allow get: if isValidId(privId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create, update: if isValidId(privId) && isAdmin()
+        && isValidGenericRecord(request.resource.data, privId)
+        && request.resource.data.keys().hasOnly(['id', 'name', 'description', 'assignedUsersCount', 'permissions', 'updatedByUid', 'serverUpdatedAt'])
+        && isOptStr(request.resource.data, 'name', 120)
+        && isOptStr(request.resource.data, 'description', 500)
+        && isOptNum(request.resource.data, 'assignedUsersCount', 0)
+        && (!('permissions' in request.resource.data)
+          || (request.resource.data.permissions is map && request.resource.data.permissions.keys().size() <= 32));
+      allow delete: if isValidId(privId) && isAdmin();
+    }
+
+    match /rbac_matrix/{roleId} {
+      allow get: if isValidId(roleId) && isWorkspaceMember();
+      allow list: if isWorkspaceMember();
+      allow create, update: if isValidId(roleId) && isAdmin()
+        && request.resource.data.keys().hasAll(['roleId', 'permissions', 'serverUpdatedAt'])
+        && request.resource.data.keys().hasOnly(['roleId', 'permissions', 'updatedAt', 'updatedByUid', 'serverUpdatedAt'])
+        && request.resource.data.roleId == roleId
+        && request.resource.data.roleId in ['super_admin', 'branch_admin', 'hr_manager', 'finance_officer', 'project_manager', 'employee']
+        && request.resource.data.permissions is map
+        && request.resource.data.permissions.keys().size() <= 250
+        && isOptStr(request.resource.data, 'updatedAt', 64)
+        && isValidUpdatedBy(request.resource.data)
+        && request.resource.data.serverUpdatedAt == request.time;
+      allow delete: if isValidId(roleId) && isAdmin();
+    }
+
+    // =========================================================================
+    // 10. Tamper-Evident Append-Only Audit Logs (/audit_logs/{logId})
+    // =========================================================================
+    match /audit_logs/{logId} {
+      allow get: if isValidId(logId) && isAuditReader();
+      allow list: if isAuditReader();
+      allow create: if isValidId(logId)
+        && isWorkspaceMember()
+        && request.resource.data.keys().hasAll(['id', 'timestamp', 'operatorName', 'operatorRole', 'operatorUid', 'actionType', 'entityType', 'details', 'serverCreatedAt'])
+        && request.resource.data.keys().hasOnly(['id', 'timestamp', 'operatorName', 'operatorRole', 'operatorUid', 'branchId', 'actionType', 'entityType', 'details', 'serverCreatedAt'])
+        && request.resource.data.id == logId
+        && isNonEmptyStr(request.resource.data.timestamp, 64)
+        && isNonEmptyStr(request.resource.data.operatorName, 100)
+        && isNonEmptyStr(request.resource.data.operatorRole, 64)
+        && isNonEmptyStr(request.resource.data.actionType, 32)
+        && isNonEmptyStr(request.resource.data.entityType, 32)
+        && isNonEmptyStr(request.resource.data.details, 500)
+        && request.resource.data.operatorUid == request.auth.uid
+        && isOptStr(request.resource.data, 'branchId', 64)
+        && request.resource.data.serverCreatedAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // =========================================================================
+    // 11. Authentication Code Challenges (/auth_challenges/{userId})
+    // =========================================================================
+    function isValidAuthChallenge(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'codeHash', 'expiresAt', 'verified', 'serverUpdatedAt'])
+        && data.keys().hasOnly([
+          'uid', 'email', 'codeHash', 'expiresAt', 'verified', 'sentAt',
+          'updatedByUid', 'serverUpdatedAt'
+        ])
+        && data.uid == userId
+        && isNonEmptyStr(data.email, 120)
+        && data.email.lower() == normalizedEmail()
+        && isNonEmptyStr(data.codeHash, 128)
+        && (data.expiresAt is int || data.expiresAt is number)
+        && data.expiresAt > 0
+        && data.verified is bool
+        && isOptStr(data, 'sentAt', 64)
+        && isValidUpdatedBy(data)
+        && data.serverUpdatedAt == request.time;
+    }
+
+    match /auth_challenges/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId) && isWorkspaceMember();
+      allow list: if false;
+      allow create, update: if isValidId(userId)
+        && isOwner(userId)
+        && isWorkspaceMember()
+        && isValidAuthChallenge(request.resource.data, userId);
+      allow delete: if isValidId(userId) && isOwner(userId) && isWorkspaceMember();
+    }
+  }
+}

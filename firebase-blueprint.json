@@ -1,0 +1,218 @@
+{
+  "entities": {
+    "AdminMarker": {
+      "title": "AdminMarker",
+      "description": "Explicit super administrator lookup document.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "grantedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["uid", "grantedBy"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Private user account profile and authorization tier (owner/admin readable only).",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "format": "email", "maxLength": 120 },
+        "displayName": { "type": "string", "maxLength": 100 },
+        "role": {
+          "type": "string",
+          "enum": ["super_admin", "branch_admin", "hr_manager", "finance_officer", "project_manager", "employee"]
+        },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "status": {
+          "type": "string",
+          "enum": ["active", "invited", "suspended"]
+        },
+        "lastLogin": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["uid", "email", "displayName", "role", "branchId", "status"]
+    },
+    "UserDirectoryEntry": {
+      "title": "UserDirectoryEntry",
+      "description": "Non-PII collaborative team member directory and device presence metadata.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "displayName": { "type": "string", "maxLength": 100 },
+        "role": {
+          "type": "string",
+          "enum": ["super_admin", "branch_admin", "hr_manager", "finance_officer", "project_manager", "employee"]
+        },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "department": { "type": "string", "maxLength": 80 },
+        "designation": { "type": "string", "maxLength": 100 },
+        "status": {
+          "type": "string",
+          "enum": ["active", "invited", "suspended"]
+        },
+        "lastDeviceType": { "type": "string", "maxLength": 24 },
+        "lastDeviceLabel": { "type": "string", "maxLength": 120 },
+        "lastActiveAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["uid", "displayName", "role", "branchId", "status"]
+    },
+    "UserInvite": {
+      "title": "UserInvite",
+      "description": "Admin-issued workspace invitation keyed by normalized lowercase email.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 120 },
+        "email": { "type": "string", "format": "email", "maxLength": 120 },
+        "displayName": { "type": "string", "maxLength": 100 },
+        "role": {
+          "type": "string",
+          "enum": ["super_admin", "branch_admin", "hr_manager", "finance_officer", "project_manager", "employee"]
+        },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "department": { "type": "string", "maxLength": 80 },
+        "designation": { "type": "string", "maxLength": 100 },
+        "status": { "type": "string", "enum": ["pending", "claimed"] },
+        "hasAccessPasscode": { "type": "boolean" },
+        "accessPasscodeHash": { "type": "string", "maxLength": 128 },
+        "invitedByUid": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "email", "displayName", "role", "branchId", "status", "invitedByUid"]
+    },
+    "DeviceSession": {
+      "title": "DeviceSession",
+      "description": "Connected device session for real-time multi-device presence.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "uid": { "type": "string", "maxLength": 128 },
+        "userName": { "type": "string", "maxLength": 100 },
+        "deviceType": { "type": "string", "enum": ["Desktop", "Tablet", "Mobile"] },
+        "platform": { "type": "string", "maxLength": 64 },
+        "browser": { "type": "string", "maxLength": 64 },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "lastSeenAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id", "uid", "userName", "deviceType", "branchId", "lastSeenAt"]
+    },
+    "Branch": {
+      "title": "Branch",
+      "description": "Enterprise operating branch or regional office.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "code": { "type": "string", "maxLength": 32 },
+        "name": { "type": "string", "maxLength": 120 },
+        "city": { "type": "string", "maxLength": 80 },
+        "region": { "type": "string", "maxLength": 80 },
+        "country": { "type": "string", "maxLength": 80 },
+        "address": { "type": "string", "maxLength": 300 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "email": { "type": "string", "maxLength": 120 },
+        "managerName": { "type": "string", "maxLength": 100 },
+        "isHeadquarters": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["active", "inactive", "opening_soon"] }
+      },
+      "required": ["id", "code", "name", "city", "country", "status"]
+    },
+    "Employee": {
+      "title": "Employee",
+      "description": "Workforce member personnel record assigned to a branch.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "fullName": { "type": "string", "maxLength": 120 },
+        "email": { "type": "string", "maxLength": 120 },
+        "department": { "type": "string", "maxLength": 100 },
+        "designation": { "type": "string", "maxLength": 100 },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "monthlyBaseSalary": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "on_leave", "probation", "inactive"] }
+      },
+      "required": ["id", "fullName", "department"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Tamper-evident append-only compliance and governance log entry.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64 },
+        "timestamp": { "type": "string", "maxLength": 64 },
+        "operatorName": { "type": "string", "maxLength": 100 },
+        "operatorRole": { "type": "string", "maxLength": 64 },
+        "operatorUid": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 64 },
+        "actionType": { "type": "string", "maxLength": 32 },
+        "entityType": { "type": "string", "maxLength": 32 },
+        "details": { "type": "string", "maxLength": 500 }
+      },
+      "required": ["id", "timestamp", "operatorName", "operatorRole", "actionType", "entityType", "details"]
+    },
+    "RbacMatrix": {
+      "title": "RbacMatrix",
+      "description": "Persisted role-based authorization matrix.",
+      "type": "object",
+      "properties": {
+        "roleId": { "type": "string", "maxLength": 64 },
+        "permissions": { "type": "object" },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["roleId"]
+    },
+    "WorkspaceRecord": {
+      "title": "WorkspaceRecord",
+      "description": "Multi-device synced operational ERP entity record (departments, timesheets, leaves, expenses, projects, villas, assets, manpower, inventory, settings).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "branchId": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["id"]
+    },
+    "AuthChallenge": {
+      "title": "AuthChallenge",
+      "description": "SHA-256 hashed short-lived 6-digit authentication code challenge bound to the authenticated user.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "format": "email", "maxLength": 120 },
+        "codeHash": { "type": "string", "maxLength": 128 },
+        "expiresAt": { "type": "number" },
+        "verified": { "type": "boolean" },
+        "sentAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": ["uid", "email", "codeHash", "expiresAt", "verified"]
+    }
+  },
+  "firestore": {
+    "/admins/{userId}": { "schema": "AdminMarker", "description": "Explicit super admin lookup markers" },
+    "/users/{userId}": { "schema": "UserProfile", "description": "Private user account profiles (owner or admin only)" },
+    "/user_directory/{userId}": { "schema": "UserDirectoryEntry", "description": "Non-PII workspace collaborator & device presence directory" },
+    "/user_invites/{inviteId}": { "schema": "UserInvite", "description": "Admin-issued user invitations keyed by lowercase email" },
+    "/device_sessions/{sessionId}": { "schema": "DeviceSession", "description": "Real-time connected device sessions" },
+    "/branches/{branchId}": { "schema": "Branch", "description": "Multi-branch locations and hubs" },
+    "/employees/{employeeId}": { "schema": "Employee", "description": "Workforce directory records" },
+    "/departments/{deptId}": { "schema": "WorkspaceRecord", "description": "Organization departments" },
+    "/designations/{desId}": { "schema": "WorkspaceRecord", "description": "Organization job designations" },
+    "/timesheet_entries/{entryId}": { "schema": "WorkspaceRecord", "description": "Monthly attendance & timesheet ledger cells" },
+    "/leave_requests/{leaveId}": { "schema": "WorkspaceRecord", "description": "Employee leave applications and approvals" },
+    "/accounting_categories/{catId}": { "schema": "WorkspaceRecord", "description": "Chart of accounts expense categories" },
+    "/expenses/{expenseId}": { "schema": "WorkspaceRecord", "description": "Corporate and branch expense vouchers" },
+    "/projects/{projectId}": { "schema": "WorkspaceRecord", "description": "Master projects and contracts" },
+    "/villas/{villaId}": { "schema": "WorkspaceRecord", "description": "Villas, housing units & daily work entities" },
+    "/asset_categories/{catId}": { "schema": "WorkspaceRecord", "description": "Asset custody categories" },
+    "/assets/{assetId}": { "schema": "WorkspaceRecord", "description": "Company custody assets" },
+    "/manpower_suppliers/{supplierId}": { "schema": "WorkspaceRecord", "description": "Outsourced manpower vendors" },
+    "/supplied_workers/{workerId}": { "schema": "WorkspaceRecord", "description": "Outsourced contractor workers" },
+    "/manpower_pos/{posId}": { "schema": "WorkspaceRecord", "description": "Manpower service orders / POS" },
+    "/inventory_items/{itemId}": { "schema": "WorkspaceRecord", "description": "Warehouse inventory stock items" },
+    "/stock_movements/{movementId}": { "schema": "WorkspaceRecord", "description": "Inventory IN/OUT/ADJUSTMENT audit movements" },
+    "/inventory_invoices/{invoiceId}": { "schema": "WorkspaceRecord", "description": "Inventory invoices & delivery vouchers" },
+    "/corporate_settings/{settingId}": { "schema": "WorkspaceRecord", "description": "Corporate legal identity and workspace preferences" },
+    "/template_configs/{templateId}": { "schema": "WorkspaceRecord", "description": "Printable stationery & PDF template settings" },
+    "/custom_privileges/{privId}": { "schema": "WorkspaceRecord", "description": "Custom RBAC privilege profiles" },
+    "/rbac_matrix/{roleId}": { "schema": "RbacMatrix", "description": "Persisted role permissions matrix" },
+    "/audit_logs/{logId}": { "schema": "AuditLog", "description": "Append-only governance audit trail" },
+    "/auth_challenges/{userId}": { "schema": "AuthChallenge", "description": "Per-user hashed authentication code challenge for second-step sign-in verification" }
+  }
+}

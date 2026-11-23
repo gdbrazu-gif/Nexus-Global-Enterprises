@@ -31,6 +31,8 @@ export const DepartmentsDesignations: React.FC = () => {
     formatCurrency,
     baseCurrency,
     canPerformAdminAction,
+    canPerformHrAction,
+    activeBranchId,
   } = useHRMS();
 
   const [activeTab, setActiveTab] = useState<'departments' | 'designations'>('departments');
@@ -154,15 +156,19 @@ export const DepartmentsDesignations: React.FC = () => {
     }
   };
 
-  // Filtered lists
+  // Filtered lists (with branch scope support)
   const filteredDepartments = departments.filter(
     (d) =>
-      d.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      d.code.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      d.operatingUnit.toLowerCase().includes(searchQuery.toLowerCase())
+      (activeBranchId === 'all' || (d.branchId || 'BR-RUH') === activeBranchId) &&
+      (d.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        d.code.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        d.operatingUnit.toLowerCase().includes(searchQuery.toLowerCase()))
   );
 
   const filteredDesignations = designations.filter((des) => {
+    if (activeBranchId !== 'all' && (des.branchId || 'BR-RUH') !== activeBranchId) {
+      return false;
+    }
     const assignedDept = departments.find((d) => d.id === des.departmentId);
     return (
       des.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -184,26 +190,24 @@ export const DepartmentsDesignations: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
-          {canPerformAdminAction && (
-            <>
-              <button
-                onClick={() => setCreateDeptModalOpen(true)}
-                className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 shadow-xs"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                <span>New Department</span>
-              </button>
-              <button
-                onClick={() => setCreateDesigModalOpen(true)}
-                className="flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 shadow-xs"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                <span>New Job Title</span>
-              </button>
-            </>
-          )}
-        </div>
+        {(canPerformAdminAction || canPerformHrAction) && (
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setCreateDeptModalOpen(true)}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3.5 py-2 text-xs font-semibold text-slate-800 hover:bg-slate-50 transition-colors shadow-xs cursor-pointer"
+            >
+              <Plus className="h-4 w-4 text-blue-600" />
+              <span>Department</span>
+            </button>
+            <button
+              onClick={() => setCreateDesigModalOpen(true)}
+              className="flex items-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-semibold text-white hover:bg-slate-800 transition-colors shadow-xs cursor-pointer"
+            >
+              <Plus className="h-4 w-4 text-emerald-400" />
+              <span>Job Title</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Tabs & Search Bar */}
@@ -261,7 +265,7 @@ export const DepartmentsDesignations: React.FC = () => {
             return (
               <div
                 key={dept.id}
-                className="rounded-lg border border-slate-200 bg-white p-4 shadow-xs space-y-3 flex flex-col justify-between"
+                className="rounded-lg border border-slate-200 bg-white p-4 shadow-xs space-y-3 flex flex-col justify-between hover:border-slate-300 transition-all"
               >
                 <div className="space-y-3">
                   <div className="flex items-start justify-between">
@@ -276,36 +280,6 @@ export const DepartmentsDesignations: React.FC = () => {
                         </span>
                       </div>
                     </div>
-
-                    {/* Actions: View, Edit, Delete */}
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => setViewDeptModal(dept)}
-                        className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
-                        title="View Department Dossier & Staff"
-                      >
-                        <Eye className="h-3.5 w-3.5" />
-                      </button>
-
-                      {canPerformAdminAction && (
-                        <>
-                          <button
-                            onClick={() => setEditDeptModal({ ...dept })}
-                            className="rounded p-1 text-amber-600 hover:bg-amber-50"
-                            title="Edit Department"
-                          >
-                            <Edit3 className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            onClick={() => handleDeleteDept(dept)}
-                            className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
-                            title="Delete Department"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </>
-                      )}
-                    </div>
                   </div>
 
                   <div className="text-xs text-slate-600 bg-slate-50 p-2.5 rounded-md space-y-1">
@@ -318,17 +292,49 @@ export const DepartmentsDesignations: React.FC = () => {
                       <span className="text-slate-700 font-mono text-[11px]">{dept.location}</span>
                     </div>
                   </div>
+
+                  <div className="flex items-center justify-between text-xs pt-1 font-mono">
+                    <div className="text-slate-600 flex items-center gap-1 font-sans">
+                      <Users className="h-3.5 w-3.5 text-slate-400" />
+                      <span className="font-semibold">{count}</span>
+                      <span>staff</span>
+                    </div>
+                    <div className="text-slate-600 truncate max-w-[150px] font-sans">
+                      Head: <strong className="font-semibold">{dept.headEmployeeName}</strong>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="flex items-center justify-between text-xs pt-2 border-t border-slate-100 font-mono">
-                  <div className="text-slate-600 flex items-center gap-1 font-sans">
-                    <Users className="h-3.5 w-3.5 text-slate-400" />
-                    <span className="font-semibold">{count}</span>
-                    <span>staff</span>
-                  </div>
-                  <div className="text-slate-600 truncate max-w-[150px] font-sans">
-                    Head: <strong className="font-semibold">{dept.headEmployeeName}</strong>
-                  </div>
+                {/* Explicit Create/Edit/Delete action buttons for Operating Department */}
+                <div className="flex items-center gap-1.5 pt-3 border-t border-slate-100">
+                  <button
+                    onClick={() => setViewDeptModal(dept)}
+                    className="flex-1 flex items-center justify-center gap-1 rounded bg-slate-100 hover:bg-slate-200 py-1.5 px-2 text-[11px] font-medium text-slate-700 transition-colors cursor-pointer"
+                    title="View Department Dossier & Staff"
+                  >
+                    <Eye className="h-3.5 w-3.5 text-slate-500" />
+                    <span></span>
+                  </button>
+                  {(canPerformAdminAction || canPerformHrAction) && (
+                    <button
+                      onClick={() => setEditDeptModal({ ...dept })}
+                      className="flex items-center justify-center gap-1 rounded bg-amber-50 hover:bg-amber-100 border border-amber-200 py-1.5 px-2.5 text-[11px] font-semibold text-amber-800 transition-colors cursor-pointer"
+                      title="Edit Department"
+                    >
+                      <Edit3 className="h-3.5 w-3.5 text-amber-600" />
+                      <span></span>
+                    </button>
+                  )}
+                  {canPerformAdminAction && (
+                    <button
+                      onClick={() => handleDeleteDept(dept)}
+                      className="flex items-center justify-center gap-1 rounded bg-red-50 hover:bg-red-100 border border-red-200 py-1.5 px-2.5 text-[11px] font-semibold text-red-700 transition-colors cursor-pointer"
+                      title="Delete Department"
+                    >
+                      <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                      <span></span>
+                    </button>
+                  )}
                 </div>
               </div>
             );
@@ -384,30 +390,33 @@ export const DepartmentsDesignations: React.FC = () => {
                       <div className="flex items-center justify-center gap-1.5">
                         <button
                           onClick={() => setViewDesigModal(des)}
-                          className="rounded p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                          className="flex items-center gap-1 rounded bg-slate-100 hover:bg-slate-200 px-2 py-1 text-[11px] font-medium text-slate-700 transition-colors cursor-pointer"
                           title="View Details & Incumbents"
                         >
-                          <Eye className="h-3.5 w-3.5" />
+                          <Eye className="h-3 w-3 text-slate-500" />
+                          <span></span>
                         </button>
 
-                        {canPerformAdminAction && (
-                          <>
-                            <button
-                              onClick={() => setEditDesigModal({ ...des })}
-                              className="rounded p-1 text-amber-600 hover:bg-amber-50"
-                              title="Edit Designation"
-                            >
-                              <Edit3 className="h-3.5 w-3.5" />
-                            </button>
+                        {(canPerformAdminAction || canPerformHrAction) && (
+                          <button
+                            onClick={() => setEditDesigModal({ ...des })}
+                            className="flex items-center gap-1 rounded border border-amber-200 bg-amber-50 hover:bg-amber-100 px-2 py-1 text-[11px] font-semibold text-amber-800 transition-colors cursor-pointer"
+                            title="Edit Designation"
+                          >
+                            <Edit3 className="h-3 w-3 text-amber-600" />
+                            <span></span>
+                          </button>
+                        )}
 
-                            <button
-                              onClick={() => handleDeleteDesig(des)}
-                              className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
-                              title="Delete Designation"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          </>
+                        {canPerformAdminAction && (
+                          <button
+                            onClick={() => handleDeleteDesig(des)}
+                            className="flex items-center gap-1 rounded border border-red-200 bg-red-50 hover:bg-red-100 px-2 py-1 text-[11px] font-semibold text-red-700 transition-colors cursor-pointer"
+                            title="Delete Designation"
+                          >
+                            <Trash2 className="h-3 w-3 text-red-600" />
+                            <span></span>
+                          </button>
                         )}
                       </div>
                     </td>
@@ -502,8 +511,35 @@ export const DepartmentsDesignations: React.FC = () => {
               </div>
             </div>
 
-            <div className="mt-5 flex justify-end">
+            <div className="mt-5 flex items-center justify-between border-t border-slate-100 pt-3">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const d = viewDeptModal;
+                    setViewDeptModal(null);
+                    setEditDeptModal({ ...d });
+                  }}
+                  className="flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-100 transition-colors cursor-pointer"
+                >
+                  <Edit3 className="h-3.5 w-3.5 text-amber-600" />
+                  <span></span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const d = viewDeptModal;
+                    setViewDeptModal(null);
+                    handleDeleteDept(d);
+                  }}
+                  className="flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 transition-colors cursor-pointer"
+                >
+                  <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                  <span></span>
+                </button>
+              </div>
               <button
+                type="button"
                 onClick={() => setViewDeptModal(null)}
                 className="rounded-lg bg-slate-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-slate-800"
               >
@@ -797,8 +833,35 @@ export const DepartmentsDesignations: React.FC = () => {
               </div>
             </div>
 
-            <div className="mt-5 flex justify-end">
+            <div className="mt-5 flex items-center justify-between border-t border-slate-100 pt-3">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const des = viewDesigModal;
+                    setViewDesigModal(null);
+                    setEditDesigModal({ ...des });
+                  }}
+                  className="flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-100 transition-colors cursor-pointer"
+                >
+                  <Edit3 className="h-3.5 w-3.5 text-amber-600" />
+                  <span>Job Title</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const des = viewDesigModal;
+                    setViewDesigModal(null);
+                    handleDeleteDesig(des);
+                  }}
+                  className="flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-100 transition-colors cursor-pointer"
+                >
+                  <Trash2 className="h-3.5 w-3.5 text-red-600" />
+                  <span></span>
+                </button>
+              </div>
               <button
+                type="button"
                 onClick={() => setViewDesigModal(null)}
                 className="rounded-lg bg-slate-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-slate-800"
               >
@@ -870,8 +933,8 @@ export const DepartmentsDesignations: React.FC = () => {
                   </label>
                   <input
                     type="number"
-                    min={1000}
-                    step={1000}
+                    min={0}
+                    step={100}
                     value={editDesigModal.minSalary}
                     onChange={(e) =>
                       setEditDesigModal({ ...editDesigModal, minSalary: Number(e.target.value) })
@@ -885,8 +948,8 @@ export const DepartmentsDesignations: React.FC = () => {
                   </label>
                   <input
                     type="number"
-                    min={1000}
-                    step={1000}
+                    min={0}
+                    step={100}
                     value={editDesigModal.maxSalary}
                     onChange={(e) =>
                       setEditDesigModal({ ...editDesigModal, maxSalary: Number(e.target.value) })
@@ -972,8 +1035,8 @@ export const DepartmentsDesignations: React.FC = () => {
                   </label>
                   <input
                     type="number"
-                    min={1000}
-                    step={1000}
+                    min={0}
+                    step={100}
                     value={desigForm.minSalary}
                     onChange={(e) =>
                       setDesigForm({ ...desigForm, minSalary: Number(e.target.value) })
@@ -987,8 +1050,8 @@ export const DepartmentsDesignations: React.FC = () => {
                   </label>
                   <input
                     type="number"
-                    min={1000}
-                    step={1000}
+                    min={0}
+                    step={100}
                     value={desigForm.maxSalary}
                     onChange={(e) =>
                       setDesigForm({ ...desigForm, maxSalary: Number(e.target.value) })
